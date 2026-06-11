@@ -1,3 +1,14 @@
+# 可能改进的地方
+# 硬编码 GPU 数量：脚本假定有 8 张 GPU，若实际环境不同需修改 cudalist 和 split.py 的 --cuda_list。
+
+# split.py 未提供：需确保它能够按行均匀分割 CSV，且保留表头（如果 CSV 有 header）。
+
+# evaluate.py 的输入输出格式：需要与 merge.py 和 calc.py 兼容，否则合并或计算会出错。
+
+# exp_name 是占位符：实际运行时必须替换为真实模型路径。
+
+# 没有清理临时文件：脚本运行完毕后，$temp_dir 不会自动删除，需手动清理或添加 rm -rf "$temp_dir"。
+
 # Industrial_and_Scientific
 # Office_Products
 for category in "Industrial_and_Scientific"

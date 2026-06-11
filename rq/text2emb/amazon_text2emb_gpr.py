@@ -10,6 +10,7 @@ from utils import *
 from transformers import AutoTokenizer, AutoModel
 from accelerate import Accelerator
 from accelerate.utils import gather_object
+from utils import load_json, clean_text
 
 def load_data(args):
     if args.root:

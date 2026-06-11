@@ -679,6 +679,7 @@ class ReReTrainer(Trainer):
             prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
+        # prompt_ids:  [B*G, P]    prompt_mask: [B*G, P]
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
         
@@ -686,6 +687,7 @@ class ReReTrainer(Trainer):
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
 
+        # 构造受限解码器
         ccc = ConstrainedLogitsProcessor(
                 # guidance_scale=1.0,
                 # cf_logits=None,

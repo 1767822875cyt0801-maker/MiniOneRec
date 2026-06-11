@@ -1051,7 +1051,7 @@ class RLSidhis2TitleDataset(BaseDataset):
             category: Category name for prompts
             dedup: Whether to filter duplicate items
         """
-        BaseDataset.__init__(self, tokenizer=None, max_len=1024, test=False, category=category, dedup=dedup, seed=seed)
+        super().__init__(self, tokenizer=None, max_len=1024, test=False, category=category, dedup=dedup, seed=seed)
 
         # Initialize CSV part
         self.data = pd.read_csv(train_file)

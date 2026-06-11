@@ -81,7 +81,8 @@ def setup_seed(seed):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
+    
+#states 是指 batch 中 B 条用户历史序列，每条序列包含过去最多 T 个交互物品；len_states 不是用户人数，而是这 B 条序列各自的真实长度；supervised_output 是这 B 条用户序列对 item_num 个候选物品的预测分数。
 
 class GRU(nn.Module):
     def __init__(self, hidden_size, item_num, state_size, gru_layers=1):

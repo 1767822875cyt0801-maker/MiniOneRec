@@ -51,6 +51,13 @@ def create_item_info_file(items: Dict[str, Dict], item_to_semantic: Dict[str, Li
                 item_title = item_data.get('title', f'Item_{item_id}')
                 f.write(f"{semantic_id}\t{item_title}\t{item_id}\n")
 
+# 把原始交互样本：
+# user_id, history item ids, target item id
+
+# 转换成 MiniOneRec 需要的：
+# user_id, history item titles, target item title,
+# history item ids, target item id,
+# history item semantic IDs, target item semantic ID
 def convert_interactions_to_csv(splits: Dict[str, List], items: Dict[str, Dict], 
                                item_to_semantic: Dict[str, List], output_dir: str, category: str = "Office_Products",
                                max_valid_samples: int = None, max_test_samples: int = None, seed: int = 42,
@@ -64,7 +71,7 @@ def convert_interactions_to_csv(splits: Dict[str, List], items: Dict[str, Dict],
     
     for split_name, split_data in splits.items():
         rows = []
-        user_to_longest = {}  # For train data: keep only longest sequence per user
+        user_to_longest = {}  # For train data: keep only longest sequence per user。只在训练集开启 keep_longest_only 时使用。它的作用是：记录每个 user 当前见过的最长历史序列样本
         
         for line in split_data:
             if len(line) != 3:

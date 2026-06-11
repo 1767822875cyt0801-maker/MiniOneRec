@@ -68,10 +68,12 @@ class VectorQuantizer(nn.Module):
             self.init_emb(latent)
 
         # Calculate the L2 Norm between latent and Embedded weights
+        # d.shape= [N,K]
         d = torch.sum(latent**2, dim=1, keepdim=True) + \
             torch.sum(self.embedding.weight**2, dim=1, keepdim=True).t()- \
             2 * torch.matmul(latent, self.embedding.weight.t())
         if not use_sk or self.sk_epsilon <= 0:
+            # indices.shape = [N,]
             indices = torch.argmin(d, dim=-1)
         else:
             d = self.center_distance_for_constraint(d)
@@ -87,8 +89,11 @@ class VectorQuantizer(nn.Module):
         x_q = self.embedding(indices).view(x.shape)
 
         # compute loss for embedding
+        # commitment_loss = ||stop_gradient(x_q) - x||²
         commitment_loss = F.mse_loss(x_q.detach(), x)
+        # codebook_loss = ||x_q - stop_gradient(x)||²
         codebook_loss = F.mse_loss(x_q, x.detach())
+        # 量化损失 = codebook 更新项 + beta × encoder commitment 项
         loss = codebook_loss + self.beta * commitment_loss
 
         # preserve gradients
@@ -96,6 +101,7 @@ class VectorQuantizer(nn.Module):
 
         indices = indices.view(x.shape[:-1])
 
+        # x_q 根据最近的 codebook index 查出来的量化向量
         return x_q, loss, indices
 
 

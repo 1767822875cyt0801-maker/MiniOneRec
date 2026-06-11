@@ -617,9 +617,9 @@ if __name__ == '__main__':
     print("Creating item features...")
     item2feature = create_item_features_amazon18_style(metadata, item2index, id_title, item_counts)
     
-    # Create user features
-    print("Creating user features...")
-    create_user_features(filtered_reviews, user2index, args.output_path, args.dataset)
+    # # Create user features
+    # print("Creating user features...")
+    # create_user_features(filtered_reviews, user2index, args.output_path, args.dataset)
     
     # Load review data
     print("Loading review data...")

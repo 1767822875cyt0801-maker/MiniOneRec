@@ -72,14 +72,22 @@ class RQVAE(nn.Module):
         return indices
 
     def compute_loss(self, out, quant_loss, xs=None):
-
+        # loss_recon: decoder 输出 out 和原始输入 xs 的重构误差
         if self.loss_type == 'mse':
             loss_recon = F.mse_loss(out, xs, reduction='mean')
         elif self.loss_type == 'l1':
             loss_recon = F.l1_loss(out, xs, reduction='mean')
         else:
             raise ValueError('incompatible loss type')
-
+        
+        # quant_loss = rq_loss = 多层 VQ loss 的平均
+        # loss_total
+        # =
+        # loss_recon
+        # +
+        # quant_loss_weight × mean_l(
+        #     codebook_loss_l + beta × commitment_loss_l
+        # )
         loss_total = loss_recon + self.quant_loss_weight * quant_loss
 
         return loss_total, loss_recon
