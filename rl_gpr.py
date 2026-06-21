@@ -1,3 +1,36 @@
+import os
+import warnings
+
+
+def _is_positive_int(value):
+    try:
+        return int(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _prepare_runtime_env():
+    if not _is_positive_int(os.environ.get("OMP_NUM_THREADS")):
+        os.environ["OMP_NUM_THREADS"] = "1"
+    if not _is_positive_int(os.environ.get("MKL_NUM_THREADS")):
+        os.environ["MKL_NUM_THREADS"] = "1"
+    if "TRANSFORMERS_CACHE" in os.environ and "HF_HOME" not in os.environ:
+        os.environ["HF_HOME"] = os.environ["TRANSFORMERS_CACHE"]
+    os.environ.pop("TRANSFORMERS_CACHE", None)
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+
+_prepare_runtime_env()
+warnings.filterwarnings("ignore", message=".*TRANSFORMERS_CACHE.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*UnsupportedFieldAttributeWarning.*")
+warnings.filterwarnings("ignore", message=".*A value is trying to be set on a copy.*")
+try:
+    from pandas.errors import SettingWithCopyWarning
+    warnings.filterwarnings("ignore", category=SettingWithCopyWarning)
+except Exception:
+    pass
+
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 import random
@@ -6,7 +39,6 @@ import torch
 from data import D3Dataset, SidDataset, RLTitle2SidDataset, RLSeqTitle2SidDataset, RLSid2TitleDataset, RLSidhis2TitleDataset
 from torch.utils.data import ConcatDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import os
 from minionerec_trainer import ReReTrainer
 from sasrec import SASRec
 from fire import Fire
@@ -14,9 +46,65 @@ import pickle
 import math
 import json
 from sklearn.metrics import ndcg_score
-import re
+from utils_sid import normalize_sid, parse_sid_tokens
 
-os.environ['WANDB_MODE'] = 'disabled'
+os.environ.setdefault("WANDB_MODE", "disabled")
+
+
+def resolve_model_path(model_path: str) -> str:
+    if not model_path:
+        raise ValueError("--model_path is required")
+
+    expanded = os.path.expanduser(model_path)
+    looks_like_local_path = (
+        expanded.startswith(".")
+        or expanded.startswith("/")
+        or os.path.sep in expanded
+    )
+    if os.path.exists(expanded):
+        return os.path.abspath(expanded)
+
+    if looks_like_local_path:
+        parent = os.path.dirname(expanded) or "."
+        parent_hint = ""
+        if os.path.isdir(parent):
+            try:
+                candidates = sorted(os.listdir(parent))[:20]
+                parent_hint = f" Existing entries under {parent}: {candidates}"
+            except OSError:
+                parent_hint = ""
+        raise FileNotFoundError(
+            f"--model_path looks like a local path but does not exist: {model_path}. "
+            f"Please pass the real SFT checkpoint directory, e.g. an existing final_checkpoint "
+            f"or checkpoint-* directory.{parent_hint}"
+        )
+
+    return model_path
+
+
+def validate_grpo_batch_sizes(train_batch_size: int, eval_batch_size: int, num_generations: int) -> None:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    global_train_batch = train_batch_size * world_size
+    global_eval_batch = eval_batch_size * world_size
+    bad = []
+    if num_generations <= 0:
+        raise ValueError(f"--num_generations must be positive, got {num_generations}")
+    if global_train_batch % num_generations != 0:
+        bad.append(
+            f"global train batch size ({train_batch_size} * {world_size} = {global_train_batch})"
+        )
+    if global_eval_batch % num_generations != 0:
+        bad.append(
+            f"global eval batch size ({eval_batch_size} * {world_size} = {global_eval_batch})"
+        )
+    if bad:
+        raise ValueError(
+            "GRPO requires global train/eval batch sizes to be divisible by "
+            f"num_generations={num_generations}. Invalid: {', '.join(bad)}. "
+            "For single-GPU num_generations=8, use --train_batch_size 8 "
+            "--eval_batch_size 8, or reduce --num_generations to 4."
+        )
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -53,6 +141,9 @@ def train(
     num_train_epochs: int = 1,
     learning_rate: float = 1e-6,
     beta: float = 0.04,
+    save_during_training: bool = True,
+    save_steps: float = 0.1,
+    save_total_limit: int = 20,
     beam_search: bool = False,
     test_during_training: bool = True,
     dynamic_sampling: bool = False,
@@ -65,11 +156,15 @@ def train(
     cf_path: str = "",
     sid_index_path: str = "",
     item_meta_path: str = "",
+    rl_task_mode: str = "",
+    rl_train_limit: int = -1,
+    rl_eval_limit: int = -1,
     dapo: bool = False,
     gspo: bool = False,
 ):
     torch.backends.cuda.enable_flash_sdp(False)  
     torch.backends.cuda.enable_mem_efficient_sdp(False)
+    validate_grpo_batch_sizes(train_batch_size, eval_batch_size, num_generations)
     set_seed(seed)
     
     category_dict = {"Industrial_and_Scientific": "industrial and scientific items", "Office_Products": "office products", "Toys_and_Games": "toys and games", "Sports": "sports and outdoors", "Books": "books"}
@@ -79,12 +174,12 @@ def train(
     with open(info_file, 'r') as f:
         info = f.readlines()
         # Extract semantic_id (first column) from the format: semantic_id \t item_title \t item_id
-        item_name = [_.split('\t')[0].strip() for _ in info]
+        item_name = [normalize_sid(_.split('\t')[0].strip()) for _ in info]
         item2id = {name: i for i, name in enumerate(item_name)}
 
     # Parse semantic IDs for HEPO
     def parse_sid(sid):
-        return re.findall(r'\[.*?\]', sid)
+        return parse_sid_tokens(normalize_sid(sid))
 
     item2id_parts = {}
     for name in item_name:
@@ -97,8 +192,8 @@ def train(
     
         rewards = []
         for i, comp_full_sid in enumerate(completions):
-            comp_full_sid = comp_full_sid.strip(" \n\"")
-            target_full_sid = targets_full_sid[i].strip(" \n\"")
+            comp_full_sid = normalize_sid(comp_full_sid.strip(" \n\""))
+            target_full_sid = normalize_sid(targets_full_sid[i].strip(" \n\""))
     
             if target_full_sid not in item2id_parts:
                 rewards.append(0.0)
@@ -146,8 +241,15 @@ def train(
     train_dataset = train_dataset.shuffle(seed=seed) 
     if sample_train and "sft" in model_path:
         train_dataset = train_dataset.select(range(int(0.2 * len(train_dataset)), len(train_dataset)))
+    if rl_train_limit > 0:
+        train_limit = min(rl_train_limit, len(train_dataset))
+        train_dataset = train_dataset.select(range(train_limit))
+
     eval_dataset = Dataset.from_dict({k : [elm[k] for elm in eval_data] for k in eval_data[0].keys()})
     eval_dataset = eval_dataset.shuffle(seed=seed)
+    if rl_eval_limit > 0:
+        eval_limit = min(rl_eval_limit, len(eval_dataset))
+        eval_dataset = eval_dataset.select(range(eval_limit))
     
 
     # prompt2history = {**train_data.prompt2history, **eval_data.prompt2history}
@@ -171,16 +273,33 @@ def train(
 
     print("train_dataset: ", train_dataset)
     print("eval_dataset: ", eval_dataset)
+    print(f"actual_train_size: {len(train_dataset)}")
+    print(f"actual_eval_size: {len(eval_dataset)}")
+    print(f"rl_train_limit: {rl_train_limit}")
+    print(f"rl_eval_limit: {rl_eval_limit}")
+    print(f"rl_task_mode: {rl_task_mode}")
+    print(f"reward_type: {reward_type}")
+    print(f"save_during_training: {save_during_training}")
 
-    llm_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    resolved_model_path = resolve_model_path(model_path)
+    print(f"resolved_model_path: {resolved_model_path}")
+
+    llm_model = AutoModelForCausalLM.from_pretrained(resolved_model_path, torch_dtype=torch.bfloat16, device_map="auto")
     device = llm_model.device
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_path)
     
     len_seq = 10
     item_num = len(item_name)
     print(f"item_num: {item_num}")
 
-    if reward_type == "sasrec":
+    use_sid_rec_reward = rl_task_mode == "sid_rec" or reward_type in {"hepo", "sid_rec"}
+    if reward_type == "sasrec" and not use_sid_rec_reward:
+        if not cf_path:
+            raise ValueError(
+                "--reward_type sasrec requires --cf_path. "
+                "For SID recommendation prefix reward, use --rl_task_mode sid_rec "
+                "or --reward_type hepo instead."
+            )
         model = SASRec(32, item_num, len_seq, 0.3, device)
         model.to(device)
         model.load_state_dict(torch.load(cf_path))
@@ -289,7 +408,9 @@ def train(
     
 
 
-    if reward_type == "rule":
+    if use_sid_rec_reward:
+        reward_fun = hepo_reward
+    elif reward_type == "rule":
         reward_fun = rule_reward
     elif reward_type == "ranking":
         reward_fun = [rule_reward, ndcg_rule_reward]
@@ -299,13 +420,19 @@ def train(
         reward_fun = semantic_reward
     elif reward_type == "sasrec":
         reward_fun = [cf_reward, hepo_reward] # Combine rewards
+    else:
+        raise ValueError(f"Unsupported reward_type={reward_type!r}, rl_task_mode={rl_task_mode!r}")
     
-    os.environ['WANDB_PROJECT'] = wandb_project
-    os.environ["WANDB_MODE"] = "offline"
+    if wandb_project:
+        os.environ["WANDB_PROJECT"] = wandb_project
+        os.environ.setdefault("WANDB_MODE", "offline")
+    else:
+        os.environ.setdefault("WANDB_MODE", "disabled")
+    report_to = "wandb" if wandb_project and os.environ.get("WANDB_MODE") != "disabled" else "none"
 
     training_args = GRPOConfig(output_dir=output_dir,
-                                save_steps=0.1,
-                                save_total_limit=20,
+                                save_steps=save_steps,
+                                save_total_limit=save_total_limit,
                                 eval_strategy="steps",
                                 max_completion_length=128,
                                 num_generations=num_generations,
@@ -324,13 +451,13 @@ def train(
                                 bf16=True,
                                 optim="paged_adamw_32bit",
                                 lr_scheduler_type="cosine", 
-                                save_strategy="steps",
-                                report_to="wandb",
+                                save_strategy="steps" if save_during_training else "no",
+                                report_to=report_to,
                                 run_name=wandb_run_name,
                             )
     trainer = ReReTrainer(
-        model=model_path,
-        base_model=model_path,
+        model=resolved_model_path,
+        base_model=resolved_model_path,
         dapo=dapo,
         gspo=gspo,
         add_gt=add_gt,
