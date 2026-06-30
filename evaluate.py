@@ -10,6 +10,7 @@ from LogitProcessor import ConstrainedLogitsProcessor
 from accelerate import Accelerator
 import random
 import bitsandbytes as bnb
+from utils_sid import normalize_sid, parse_sid_tokens, sid_prefixes
 
 
 
@@ -46,7 +47,7 @@ def main(
     K: int = 0,
     seed: int = 42,
     length_penalty: float=0.0,
-    max_new_tokens: int = 256,
+    max_new_tokens: int = 0,
     num_beams: int = 50,
 ):
     random.seed(seed)
@@ -61,7 +62,8 @@ def main(
     with open(info_file, 'r') as f:
         info = f.readlines()
         # Parse new format: semantic_id \t item_title \t item_id
-        semantic_ids = [line.split('\t')[0].strip() + "\n" for line in info]
+        semantic_id_values = [line.split('\t')[0].strip() for line in info if line.strip()]
+        semantic_ids = [sid + "\n" for sid in semantic_id_values]
         item_titles = [line.split('\t')[1].strip() + "\n" for line in info if len(line.split('\t')) >= 2]
         
         # Format for tokenization
@@ -70,6 +72,36 @@ def main(
 
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
+    sid_token_lengths = [len(parse_sid_tokens(sid)) for sid in semantic_id_values]
+    sid_length_distribution = {}
+    for length in sid_token_lengths:
+        sid_length_distribution[str(length)] = sid_length_distribution.get(str(length), 0) + 1
+    max_sid_token_length = max(sid_token_lengths) if sid_token_lengths else 0
+    sid_set = {normalize_sid(sid) for sid in semantic_id_values}
+    prefix_ambiguities = []
+    for sid in sorted(sid_set):
+        for prefix in sid_prefixes(sid)[:-1]:
+            if prefix in sid_set:
+                prefix_ambiguities.append({"sid": sid, "prefix_sid": prefix})
+                break
+    if max_new_tokens <= 0:
+        completion_token_lengths = [len(tokenizer(sid).input_ids) for sid in semantic_ids]
+        max_completion_tokens = max(completion_token_lengths) if completion_token_lengths else max_sid_token_length
+        max_new_tokens = max(max_sid_token_length + 2, max_completion_tokens + 1, 1)
+        print(
+            "Auto max_new_tokens inferred from info_file: "
+            f"{max_new_tokens} (max_sid_token_length={max_sid_token_length}, "
+            f"sid_length_distribution={sid_length_distribution})"
+        )
+    else:
+        print(
+            f"Using user-provided max_new_tokens={max_new_tokens}; "
+            f"max_sid_token_length={max_sid_token_length}, "
+            f"sid_length_distribution={sid_length_distribution}"
+        )
+    print(f"SID prefix ambiguity count: {len(prefix_ambiguities)}")
+    if prefix_ambiguities:
+        print(f"SID prefix ambiguity sample: {prefix_ambiguities[:5]}")
     
     # Create prefixID for semantic IDs (existing functionality)
     if base_model.lower().find("llama") > -1:
@@ -237,7 +269,6 @@ def main(
 
 if __name__ == '__main__':
     fire.Fire(main)
-
 
 
 

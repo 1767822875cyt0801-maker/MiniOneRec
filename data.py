@@ -91,7 +91,7 @@ class CSVBaseDataset(BaseDataset):
         self.data = pd.read_csv(train_file)
         
         if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
+            self.data = self.data.sample(min(sample, len(self.data)), random_state=seed)
 
 
 class JSONBaseDataset(BaseDataset):
@@ -103,6 +103,15 @@ class JSONBaseDataset(BaseDataset):
             self.item_feat = json.load(f)
         with open(index_file, 'r') as f:
             self.indices = json.load(f)
+
+
+def combine_sid_tokens(sids):
+    """Join every SID token from an index entry, preserving 3/4+ layer SIDs."""
+    if isinstance(sids, str):
+        return sids.strip()
+    if isinstance(sids, (list, tuple)):
+        return "".join(str(token).strip() for token in sids)
+    return ""
 
 
 class SFTData(CSVBaseDataset):
@@ -699,9 +708,9 @@ class SidItemFeatDataset(JSONBaseDataset):
         for item_id, sids in self.indices.items():
             if item_id in self.item_feat:
                 title = self.item_feat[item_id]['title']
-                # Concatenate all three semantic IDs as the key
-                if len(sids) >= 3:
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                # Concatenate every semantic ID token so 3/4+ layer SID versions stay consistent.
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     self.sid2title[combined_sid] = title
                     self.title2sid[title] = combined_sid
         
@@ -826,9 +835,9 @@ class RLTitle2SidDataset(JSONBaseDataset):
                     except:
                         pass
                 
-                # Concatenate all three semantic IDs as the key
-                if len(sids) >= 3:
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                # Concatenate every semantic ID token so 3/4+ layer SID versions stay consistent.
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     self.sid2title[combined_sid] = title
                     self.title2sid[title] = combined_sid
                     self.sid2description[combined_sid] = description
@@ -991,9 +1000,9 @@ class RLSid2TitleDataset(JSONBaseDataset):
         for item_id, sids in self.indices.items():
             if item_id in self.item_feat:
                 title = self.item_feat[item_id]['title']
-                # Concatenate all three semantic IDs as the key
-                if len(sids) >= 3:
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                # Concatenate every semantic ID token so 3/4+ layer SID versions stay consistent.
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     self.sid2title[combined_sid] = title
         
         # Create data samples
@@ -1056,7 +1065,7 @@ class RLSidhis2TitleDataset(BaseDataset):
         # Initialize CSV part
         self.data = pd.read_csv(train_file)
         if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
+            self.data = self.data.sample(min(sample, len(self.data)), random_state=seed)
         
         # Initialize JSON part
         with open(item_file, 'r') as f:
@@ -1146,7 +1155,7 @@ class FusionSeqRecDataset(BaseDataset):
         # Initialize CSV part
         self.data = pd.read_csv(train_file)
         if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
+            self.data = self.data.sample(min(sample, len(self.data)), random_state=seed)
         
         # Initialize JSON part
         with open(item_file, 'r') as f:
@@ -1169,9 +1178,9 @@ class FusionSeqRecDataset(BaseDataset):
                 # 3. If the longest in list is also empty, use title
                 processed_description = self._process_description(description, title)
                 
-                # Concatenate all three semantic IDs as the key
-                if len(sids) >= 3:
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                # Concatenate every semantic ID token so 3/4+ layer SID versions stay consistent.
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     self.sid2title[combined_sid] = title
                     self.sid2description[combined_sid] = processed_description
         # print("self.sid2title: ", self.sid2title)
@@ -1350,7 +1359,7 @@ class TitleHistory2SidSFTDataset(BaseDataset):
         # Initialize CSV part
         self.data = pd.read_csv(train_file)
         if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
+            self.data = self.data.sample(min(sample, len(self.data)), random_state=seed)
         
         # Initialize JSON part
         with open(item_file, 'r') as f:
@@ -1362,8 +1371,8 @@ class TitleHistory2SidSFTDataset(BaseDataset):
         # Build item_id to semantic ID mapping
         self.id2sid = {}
         for item_id, sids in self.indices.items():
-            if len(sids) >= 3:
-                combined_sid = sids[0] + sids[1] + sids[2]
+            combined_sid = combine_sid_tokens(sids)
+            if combined_sid:
                 self.id2sid[item_id] = combined_sid
         
         self.get_inputs()
@@ -1543,9 +1552,8 @@ class PreferenceSFTDataset(BaseDataset):
             item_id_str = str(item_id)
             if item_id_str in self.indices:
                 sids = self.indices[item_id_str]
-                if len(sids) >= 3:
-                    # Combine the three semantic IDs
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     semantic_ids.append(combined_sid)
                 else:
                     semantic_ids.append(item_id_str)
@@ -1726,9 +1734,8 @@ class UserPreference2sidSFTDataset(BaseDataset):
             item_id_str = str(item_id)
             if item_id_str in self.indices:
                 sids = self.indices[item_id_str]
-                if len(sids) >= 3:
-                    # Combine the three semantic IDs
-                    combined_sid = sids[0] + sids[1] + sids[2]
+                combined_sid = combine_sid_tokens(sids)
+                if combined_sid:
                     semantic_ids.append(combined_sid)
                 else:
                     semantic_ids.append(item_id_str)

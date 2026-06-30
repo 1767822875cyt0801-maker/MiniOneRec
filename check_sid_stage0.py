@@ -149,14 +149,22 @@ def csv_check(csv_path: Path, item2sid: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def check_category(data_root: Path, sid_map_dir: Path, category: str, sid_version: str) -> dict[str, Any]:
-    cat_dir = sid_map_dir / category
-    item2sid_path = cat_dir / f"item2sid_{sid_version}.json"
-    sid2items_path = cat_dir / f"sid2items_{sid_version}.json"
-    valid_sid_set_path = cat_dir / f"valid_sid_set_{sid_version}.json"
-    item_mapping_path = cat_dir / f"item_mapping_{sid_version}.json"
-
+def check_category_paths(
+    category: str,
+    sid_version: str,
+    item2sid_path: Path,
+    sid2items_path: Path,
+    valid_sid_set_path: Path,
+    item_mapping_path: Path,
+    split_csv_paths: dict[str, Path],
+    index_path: Path | None = None,
+) -> dict[str, Any]:
     for path in [item2sid_path, sid2items_path, valid_sid_set_path, item_mapping_path]:
+        if not path.exists():
+            raise FileNotFoundError(path)
+    for split, path in split_csv_paths.items():
+        if split not in {"train", "valid", "test"}:
+            raise ValueError(f"Unexpected split name: {split}")
         if not path.exists():
             raise FileNotFoundError(path)
 
@@ -176,9 +184,8 @@ def check_category(data_root: Path, sid_map_dir: Path, category: str, sid_versio
         if not rec or normalize_sid(rec.get("sid", "")) != sid or rec.get("sid_tokens") != parse_sid_tokens(sid):
             item_mapping_mismatches.append(item_id)
 
-    index_path = data_root / "index" / f"{category}.index.json"
     index_stats: dict[str, Any] | None = None
-    if index_path.exists():
+    if index_path is not None and index_path.exists():
         index_map = load_index(index_path)
         shared = set(index_map) & set(item2sid)
         conflicts = [item for item in shared if index_map[item] != item2sid[item]]
@@ -193,10 +200,7 @@ def check_category(data_root: Path, sid_map_dir: Path, category: str, sid_versio
 
     split_stats = {}
     for split in ["train", "valid", "test"]:
-        matches = sorted((data_root / split).glob(f"{category}_*.csv"))
-        if len(matches) != 1:
-            raise ValueError(f"Expected exactly one {split} CSV for {category}, found {matches}")
-        split_stats[split] = csv_check(matches[0], item2sid)
+        split_stats[split] = csv_check(split_csv_paths[split], item2sid)
 
     ok = (
         not bad_item_sids
@@ -227,6 +231,63 @@ def check_category(data_root: Path, sid_map_dir: Path, category: str, sid_versio
     }
 
 
+def check_category(data_root: Path, sid_map_dir: Path, category: str, sid_version: str) -> dict[str, Any]:
+    cat_dir = sid_map_dir / category
+    split_csv_paths = {}
+    for split in ["train", "valid", "test"]:
+        matches = sorted((data_root / split).glob(f"{category}_*.csv"))
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one {split} CSV for {category}, found {matches}")
+        split_csv_paths[split] = matches[0]
+
+    return check_category_paths(
+        category=category,
+        sid_version=sid_version,
+        item2sid_path=cat_dir / f"item2sid_{sid_version}.json",
+        sid2items_path=cat_dir / f"sid2items_{sid_version}.json",
+        valid_sid_set_path=cat_dir / f"valid_sid_set_{sid_version}.json",
+        item_mapping_path=cat_dir / f"item_mapping_{sid_version}.json",
+        split_csv_paths=split_csv_paths,
+        index_path=data_root / "index" / f"{category}.index.json",
+    )
+
+
+def check_manifest_category(manifest: dict[str, Any], category: str, sid_version: str) -> dict[str, Any]:
+    try:
+        entry = manifest["sid_versions"][sid_version][category]
+    except KeyError as exc:
+        raise KeyError(f"Missing manifest entry sid_versions[{sid_version!r}][{category!r}]") from exc
+
+    required = [
+        "item2sid",
+        "sid2items",
+        "valid_sid_set",
+        "item_mapping",
+        "train_csv",
+        "valid_csv",
+        "test_csv",
+    ]
+    missing = [key for key in required if key not in entry]
+    if missing:
+        raise KeyError(f"Manifest entry for {sid_version}/{category} missing keys: {missing}")
+
+    index_path = Path(entry["index"]) if "index" in entry else None
+    return check_category_paths(
+        category=category,
+        sid_version=sid_version,
+        item2sid_path=Path(entry["item2sid"]),
+        sid2items_path=Path(entry["sid2items"]),
+        valid_sid_set_path=Path(entry["valid_sid_set"]),
+        item_mapping_path=Path(entry["item_mapping"]),
+        split_csv_paths={
+            "train": Path(entry["train_csv"]),
+            "valid": Path(entry["valid_csv"]),
+            "test": Path(entry["test_csv"]),
+        },
+        index_path=index_path,
+    )
+
+
 def discover_categories(sid_map_dir: Path, sid_version: str) -> list[str]:
     cats = []
     for d in sorted(p for p in sid_map_dir.iterdir() if p.is_dir()):
@@ -239,16 +300,38 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verify MiniOneRec stage-0 SID mapping artifacts.")
     parser.add_argument("--data-root", type=Path, default=Path("data/Amazon"))
     parser.add_argument("--sid-map-dir", type=Path, default=Path("data/Amazon/sid_maps"))
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--category", default=None)
     parser.add_argument("--categories", nargs="*", default=None)
     parser.add_argument("--sid-version", default="text")
     parser.add_argument("--report-path", type=Path, default=Path("data/Amazon/sid_maps/stage0_check_report.json"))
     args = parser.parse_args()
 
-    categories = args.categories or discover_categories(args.sid_map_dir, args.sid_version)
-    if not categories:
-        raise ValueError(f"No categories found in {args.sid_map_dir} for sid_version={args.sid_version}")
+    if args.manifest is not None:
+        manifest = load_json(args.manifest)
+        sid_versions = manifest.get("sid_versions", {})
+        if args.sid_version not in sid_versions:
+            raise KeyError(f"sid_version={args.sid_version!r} not found in {args.manifest}")
+        categories = []
+        if args.category:
+            categories.append(args.category)
+        if args.categories:
+            categories.extend(args.categories)
+        if not categories:
+            categories = sorted(sid_versions[args.sid_version])
+        reports = [check_manifest_category(manifest, c, args.sid_version) for c in categories]
+    else:
+        categories = []
+        if args.category:
+            categories.append(args.category)
+        if args.categories:
+            categories.extend(args.categories)
+        if not categories:
+            categories = discover_categories(args.sid_map_dir, args.sid_version)
+        reports = [check_category(args.data_root, args.sid_map_dir, c, args.sid_version) for c in categories]
 
-    reports = [check_category(args.data_root, args.sid_map_dir, c, args.sid_version) for c in categories]
+    if not categories:
+        raise ValueError(f"No categories found for sid_version={args.sid_version}")
     final = {
         "ok": all(r["ok"] for r in reports),
         "sid_version": args.sid_version,

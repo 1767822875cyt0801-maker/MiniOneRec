@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-bucket", choices=["median"], default="median")
     parser.add_argument("--short-history-max-len", type=int, default=None)
     parser.add_argument("--sid-version", default="text")
+    parser.add_argument("--prefix-levels", type=int, nargs="+", default=None)
     return parser.parse_args()
 
 
@@ -105,6 +106,31 @@ def sid_prefix(sid: str, level: int) -> str | None:
     if len(tokens) < level:
         return None
     return "".join(tokens[:level])
+
+
+def sid_length_distribution(sids: list[str] | set[str]) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for sid in sids:
+        length = len(parse_sid_tokens(sid))
+        key = str(length)
+        distribution[key] = distribution.get(key, 0) + 1
+    return dict(sorted(distribution.items(), key=lambda item: int(item[0])))
+
+
+def infer_prefix_levels(
+    valid_sid_set: set[str],
+    records: list[dict[str, Any]],
+    explicit_levels: list[int] | None,
+) -> list[int]:
+    if explicit_levels:
+        return sorted(set(level for level in explicit_levels if level > 0))
+
+    lengths = [len(parse_sid_tokens(sid)) for sid in valid_sid_set]
+    lengths.extend(len(parse_sid_tokens(record["target_sid"])) for record in records)
+    for record in records:
+        lengths.extend(len(parse_sid_tokens(sid)) for sid in record["pred_sids"])
+    max_level = max(lengths) if lengths else 0
+    return list(range(1, max_level + 1))
 
 
 def read_csv_rows(path: Path | None) -> tuple[list[dict[str, str]], list[str]]:
@@ -391,6 +417,7 @@ def evaluate_predictions(
     valid_sid_set: set[str],
     sid2items: dict[str, list[str]],
     topk: list[int],
+    prefix_levels: list[int],
 ) -> dict[str, Any]:
     total_predictions = 0
     invalid_predictions = 0
@@ -412,7 +439,7 @@ def evaluate_predictions(
         record["sid_hit_rank_1_based"] = (
             record["sid_hit_rank_0_based"] + 1 if record["sid_hit_rank_0_based"] is not None else None
         )
-        for level in [1, 2, 3]:
+        for level in prefix_levels:
             rank = first_prefix_hit_rank(record["target_sid"], pred_sids, level)
             record[f"prefix_{level}_hit_rank_0_based"] = rank
             record[f"prefix_{level}_hit_rank_1_based"] = rank + 1 if rank is not None else None
@@ -422,7 +449,7 @@ def evaluate_predictions(
     sid_level = aggregate_rank_metrics(prediction_records, "sid_hit_rank_0_based", topk)
     prefix_level = {
         f"prefix@{level}": aggregate_prefix_metrics(prediction_records, level, topk)
-        for level in [1, 2, 3]
+        for level in prefix_levels
     }
     validity = {
         "invalid_sid_count": invalid_predictions,
@@ -451,10 +478,10 @@ def evaluate_predictions(
     }
 
 
-def build_per_sample_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_per_sample_rows(records: list[dict[str, Any]], prefix_levels: list[int]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
-        rows.append({
+        row = {
             "row_index": record["row_index"],
             "target_sid": record["target_sid"],
             "target_item_id": record.get("target_item_id", ""),
@@ -467,11 +494,12 @@ def build_per_sample_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]
             "duplicate_count": record.get("duplicate_count", 0),
             "hit_rank_0_based": "" if record.get("sid_hit_rank_0_based") is None else record["sid_hit_rank_0_based"],
             "hit_rank_1_based": "" if record.get("sid_hit_rank_1_based") is None else record["sid_hit_rank_1_based"],
-            "prefix1_hit_rank_0_based": "" if record.get("prefix_1_hit_rank_0_based") is None else record["prefix_1_hit_rank_0_based"],
-            "prefix2_hit_rank_0_based": "" if record.get("prefix_2_hit_rank_0_based") is None else record["prefix_2_hit_rank_0_based"],
-            "prefix3_hit_rank_0_based": "" if record.get("prefix_3_hit_rank_0_based") is None else record["prefix_3_hit_rank_0_based"],
             "target_sid_bucket_size": record.get("target_sid_bucket_size", NOT_AVAILABLE),
-        })
+        }
+        for level in prefix_levels:
+            key = f"prefix_{level}_hit_rank_0_based"
+            row[f"prefix{level}_hit_rank_0_based"] = "" if record.get(key) is None else record[key]
+        rows.append(row)
     return rows
 
 
@@ -496,10 +524,11 @@ def main() -> None:
     item2sid, item2sid_errors = normalize_item2sid(args.item2sid)
     sid2items, sid2items_errors = normalize_sid2items(args.sid2items)
     prediction_records = load_predictions(args.prediction_file)
+    prefix_levels = infer_prefix_levels(valid_sid_set, prediction_records, args.prefix_levels)
 
     test_rows, test_errors = read_csv_rows(args.test_csv)
     train_rows, train_errors = read_csv_rows(args.train_csv)
-    core_metrics = evaluate_predictions(prediction_records, valid_sid_set, sid2items, topk)
+    core_metrics = evaluate_predictions(prediction_records, valid_sid_set, sid2items, topk, prefix_levels)
     group_metrics, _ = enrich_with_test_alignment(
         prediction_records,
         test_rows,
@@ -522,6 +551,7 @@ def main() -> None:
             "train_csv": args.train_csv.as_posix() if args.train_csv else NOT_AVAILABLE,
         },
         "topk": topk,
+        "prefix_levels": prefix_levels,
         "errors": {
             "test_csv": test_errors,
             "train_csv": train_errors,
@@ -533,6 +563,17 @@ def main() -> None:
         "prefix_hit": core_metrics["prefix_level"],
         "validity": core_metrics["validity"],
         "duplicate_generation": core_metrics["duplication"],
+        "sid_length_distribution": {
+            "valid_sid_set": sid_length_distribution(valid_sid_set),
+            "targets": sid_length_distribution([record["target_sid"] for record in prediction_records]),
+            "predictions": sid_length_distribution([
+                sid for record in prediction_records for sid in record["pred_sids"]
+            ]),
+        },
+        "dedup_sid_note": (
+            "For dedup SID versions, levels 1-3 are semantic/KMeans prefixes; "
+            "level 4 is a disambiguation suffix and should not be interpreted as a semantic level."
+        ),
         "group_metrics": group_metrics,
         "reserved_metrics": RESERVED_METRICS,
     }
@@ -543,9 +584,7 @@ def main() -> None:
     per_sample_csv = output_dir / "per_sample_eval.csv"
     write_json(report_json, report)
     write_csv(report_csv, ["metric", "value"], flatten_metrics(report))
-    write_csv(
-        per_sample_csv,
-        [
+    per_sample_fieldnames = [
             "row_index",
             "target_sid",
             "target_item_id",
@@ -558,13 +597,10 @@ def main() -> None:
             "duplicate_count",
             "hit_rank_0_based",
             "hit_rank_1_based",
-            "prefix1_hit_rank_0_based",
-            "prefix2_hit_rank_0_based",
-            "prefix3_hit_rank_0_based",
-            "target_sid_bucket_size",
-        ],
-        build_per_sample_rows(prediction_records),
-    )
+        ]
+    per_sample_fieldnames.extend([f"prefix{level}_hit_rank_0_based" for level in prefix_levels])
+    per_sample_fieldnames.append("target_sid_bucket_size")
+    write_csv(per_sample_csv, per_sample_fieldnames, build_per_sample_rows(prediction_records, prefix_levels))
 
     print(f"Wrote report JSON: {report_json}")
     print(f"Wrote report CSV: {report_csv}")

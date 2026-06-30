@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emb-path", type=Path, required=True)
     parser.add_argument("--item-order", type=Path, required=True)
     parser.add_argument("--row-index", type=Path, required=True)
-    parser.add_argument("--item-json", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, default=Path("data/Amazon/sid_maps/generated"))
+    parser.add_argument("--item-json", type=Path, default=None)
+    parser.add_argument("--output-root", type=Path, default=Path("data/Amazon/sid_versions"))
     parser.add_argument("--num-levels", type=int, default=3)
     parser.add_argument("--codebook-size", type=int, default=256)
     parser.add_argument("--max-iter", type=int, default=100)
@@ -57,9 +58,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--generated-manifest",
         type=Path,
-        default=Path("data/Amazon/sid_maps/generated/generated_sid_manifest.json"),
+        default=None,
     )
     parser.add_argument("--normalize", choices=["l2", "none"], default="l2")
+    parser.add_argument(
+        "--dedup-mode",
+        choices=["none", "append"],
+        default="none",
+        help="How to disambiguate collided full SID buckets. append adds a fourth <d_i> token only to collided buckets.",
+    )
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing generated SID version directory.")
     return parser.parse_args()
 
 
@@ -178,6 +186,11 @@ def run_residual_kmeans(
     ]
 
     for level in range(num_levels):
+        print(
+            f"  Fitting residual KMeans level {level + 1}/{num_levels} "
+            f"(n_clusters={n_clusters}, max_iter={max_iter})...",
+            flush=True,
+        )
         kwargs: dict[str, Any] = {
             "n_clusters": n_clusters,
             "random_state": seed + level,
@@ -200,6 +213,11 @@ def run_residual_kmeans(
         reconstruction += assigned
         residual -= assigned
         residual_norm_by_level.append({"level": level + 1, **norm_stats(np, residual)})
+        print(
+            f"  Finished level {level + 1}/{num_levels}: "
+            f"unique_codes={level_unique_codes[-1]}, residual_mean_norm={residual_norm_by_level[-1]['mean']:.6f}",
+            flush=True,
+        )
 
     reconstruction_mse = float(np.mean((embeddings - reconstruction) ** 2))
     residual_norm_by_level[-1]["reconstruction_mse"] = reconstruction_mse
@@ -220,6 +238,67 @@ def codes_to_index(codes: Any, item_order: list[str]) -> dict[str, list[str]]:
 
 def build_item2sid(index: dict[str, list[str]]) -> dict[str, str]:
     return {item_id: "".join(tokens) for item_id, tokens in index.items()}
+
+
+def sid_length_distribution(index: dict[str, list[str]]) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for tokens in index.values():
+        key = str(len(tokens))
+        distribution[key] = distribution.get(key, 0) + 1
+    return dict(sorted(distribution.items(), key=lambda item: int(item[0])))
+
+
+def empty_dedup_report(index: dict[str, list[str]]) -> dict[str, Any]:
+    return {
+        "num_items_with_suffix": 0,
+        "num_suffix_tokens": 0,
+        "max_suffix_index": 0,
+        "sid_length_distribution": sid_length_distribution(index),
+    }
+
+
+def append_collision_suffixes(
+    index: dict[str, list[str]],
+    item_order: list[str],
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    sid_buckets: dict[str, list[str]] = defaultdict(list)
+    for item_id in item_order:
+        sid_buckets["".join(index[item_id])].append(item_id)
+
+    deduped_index: dict[str, list[str]] = {}
+    num_items_with_suffix = 0
+    max_suffix_index = 0
+    for item_id in item_order:
+        base_tokens = list(index[item_id])
+        bucket = sid_buckets["".join(base_tokens)]
+        if len(bucket) <= 1:
+            deduped_index[item_id] = base_tokens
+            continue
+
+        suffix_index = bucket.index(item_id) + 1
+        max_suffix_index = max(max_suffix_index, suffix_index)
+        num_items_with_suffix += 1
+        deduped_index[item_id] = base_tokens + [f"<d_{suffix_index}>"]
+
+    return deduped_index, {
+        "num_items_with_suffix": num_items_with_suffix,
+        "num_suffix_tokens": max_suffix_index,
+        "max_suffix_index": max_suffix_index,
+        "sid_length_distribution": sid_length_distribution(deduped_index),
+    }
+
+
+def apply_dedup_mode(
+    index: dict[str, list[str]],
+    item_order: list[str],
+    dedup_mode: str,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    if dedup_mode == "none":
+        copied_index = {item_id: list(tokens) for item_id, tokens in index.items()}
+        return copied_index, empty_dedup_report(copied_index)
+    if dedup_mode == "append":
+        return append_collision_suffixes(index, item_order)
+    raise ValueError(f"Unsupported dedup mode: {dedup_mode}")
 
 
 def build_item_mapping(
@@ -270,11 +349,14 @@ def bucket_metrics(item2sid: dict[str, str], sid2items: dict[str, list[str]]) ->
     num_unique_sid = len(sid2items)
     bucket_sizes = [len(items) for items in sid2items.values()]
     collided_items = sum(size for size in bucket_sizes if size > 1)
+    num_collision_buckets = sum(1 for size in bucket_sizes if size > 1)
     return {
+        "num_items": num_items,
         "num_unique_sid": num_unique_sid,
         "collision_rate": 1.0 - rate(num_unique_sid, num_items),
         "collided_item_rate": rate(collided_items, num_items),
         "max_bucket_size": max(bucket_sizes) if bucket_sizes else 0,
+        "num_collision_buckets": num_collision_buckets,
     }
 
 
@@ -289,17 +371,17 @@ def update_generated_manifest(path: Path, sid_version: str, category: str, entry
     save_json(manifest, path)
 
 
-def output_paths(output_dir: Path, category: str, sid_version: str) -> dict[str, Path]:
+def output_paths(output_dir: Path) -> dict[str, Path]:
     return {
-        "index": output_dir / f"{category}.index.json",
-        "info": output_dir / f"{category}.info.txt",
-        "item2sid": output_dir / f"item2sid_{sid_version}.json",
-        "sid2items": output_dir / f"sid2items_{sid_version}.json",
-        "valid_sid_set": output_dir / f"valid_sid_set_{sid_version}.json",
-        "item_mapping": output_dir / f"item_mapping_{sid_version}.json",
-        "codes": output_dir / f"{category}.codes.npy",
-        "codebooks": output_dir / f"{category}.codebooks.npz",
-        "generation_report": output_dir / "generation_report.json",
+        "index": output_dir / "index.json",
+        "info": output_dir / "info.txt",
+        "item2sid": output_dir / "item2sid.json",
+        "sid2items": output_dir / "sid2items.json",
+        "valid_sid_set": output_dir / "valid_sid_set.json",
+        "item_mapping": output_dir / "item_mapping.json",
+        "codes": output_dir / "codes.npy",
+        "codebooks": output_dir / "codebooks.npz",
+        "generation_report": output_dir / "reports" / "generation_report.json",
     }
 
 
@@ -311,6 +393,13 @@ def print_summary(report: dict[str, Any]) -> None:
     print(f"[{report['category']}]")
     print(f"  emb_shape={report['emb_shape']}")
     print(f"  level_unique_codes={report['level_unique_codes']}")
+    print(f"  dedup_mode={report['dedup_mode']}")
+    if report["dedup_mode"] != "none":
+        print(
+            "  pre_dedup_collision="
+            f"{report['pre_dedup']['collision_rate']:.6f} "
+            f"post_dedup_collision={report['post_dedup']['collision_rate']:.6f}"
+        )
     print(f"  num_unique_sid={report['num_unique_sid']}")
     print(f"  collision_rate={report['collision_rate']:.6f}")
     print(f"  collided_item_rate={report['collided_item_rate']:.6f}")
@@ -329,6 +418,8 @@ def main() -> None:
         raise ValueError("--num-levels must be positive")
     if args.num_levels > 26:
         raise ValueError("--num-levels must be <= 26")
+    if args.dedup_mode == "append" and args.num_levels != 3:
+        raise ValueError("--dedup-mode append currently expects --num-levels 3 so the suffix is the fourth <d_i> token")
     if args.codebook_size <= 0:
         raise ValueError("--codebook-size must be positive")
     if args.max_iter <= 0:
@@ -338,6 +429,16 @@ def main() -> None:
 
     np, MiniBatchKMeans = import_required_dependencies()
     warnings: list[str] = []
+    item_json = args.item_json or Path("data/Amazon/index") / f"{args.category}.item.json"
+    required_inputs = {
+        "emb_path": args.emb_path,
+        "item_order": args.item_order,
+        "row_index": args.row_index,
+        "item_json": item_json,
+    }
+    missing_inputs = [f"{name}={path}" for name, path in required_inputs.items() if not path.exists()]
+    if missing_inputs:
+        raise FileNotFoundError("Required input files are missing: " + "; ".join(missing_inputs))
 
     embeddings_raw = np.load(args.emb_path)
     if embeddings_raw.ndim != 2:
@@ -380,17 +481,40 @@ def main() -> None:
     )
     reconstruction_mse = float(residual_norms[-1].get("reconstruction_mse", math.nan))
 
-    index = codes_to_index(codes, item_order)
+    pre_dedup_index = codes_to_index(codes, item_order)
+    pre_dedup_item2sid = build_item2sid(pre_dedup_index)
+    pre_dedup_sid2items = build_sid2items(pre_dedup_item2sid)
+    pre_dedup_metrics = bucket_metrics(pre_dedup_item2sid, pre_dedup_sid2items)
+
+    index, dedup_report = apply_dedup_mode(pre_dedup_index, item_order, args.dedup_mode)
     item2sid = build_item2sid(index)
     sid2items = build_sid2items(item2sid)
-    item_titles, missing_title_items = load_item_titles(args.item_json, item_order)
+    post_dedup_metrics = bucket_metrics(item2sid, sid2items)
+    if args.dedup_mode == "append" and post_dedup_metrics["num_unique_sid"] != len(item2sid):
+        raise ValueError("append dedup failed to produce unique full SIDs")
+
+    item_titles, missing_title_items = load_item_titles(item_json, item_order)
     if missing_title_items:
         warnings.append(f"{len(missing_title_items)} items are missing title in item_json.")
     item_mapping = build_item_mapping(item_order, item2sid, item_titles)
-    metrics = bucket_metrics(item2sid, sid2items)
 
     output_dir = args.output_root / args.sid_version / args.category
-    paths = output_paths(output_dir, args.category, args.sid_version)
+    paths = output_paths(output_dir)
+    core_outputs = [
+        paths["index"],
+        paths["info"],
+        paths["item2sid"],
+        paths["sid2items"],
+        paths["valid_sid_set"],
+        paths["item_mapping"],
+    ]
+    existing_core_outputs = [path for path in core_outputs if path.exists()]
+    if existing_core_outputs and not args.overwrite:
+        examples = ", ".join(path.as_posix() for path in existing_core_outputs[:6])
+        raise FileExistsError(
+            f"Generated SID outputs already exist under {output_dir}. "
+            f"Refusing to overwrite: {examples}. Use --overwrite to replace this SID version."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(paths["codes"], codes)
@@ -409,7 +533,7 @@ def main() -> None:
         "emb_path": args.emb_path.as_posix(),
         "item_order": args.item_order.as_posix(),
         "row_index": args.row_index.as_posix(),
-        "item_json": args.item_json.as_posix(),
+        "item_json": item_json.as_posix(),
         "index": path_strings["index"],
         "info": path_strings["info"],
         "item2sid": path_strings["item2sid"],
@@ -420,13 +544,21 @@ def main() -> None:
         "codebooks": path_strings["codebooks"],
         "generation_report": path_strings["generation_report"],
     }
-    update_generated_manifest(args.generated_manifest, args.sid_version, args.category, generated_manifest_entry)
+    if args.generated_manifest is not None:
+        update_generated_manifest(args.generated_manifest, args.sid_version, args.category, generated_manifest_entry)
+
+    sid_parse_success = sum(1 for sid in item2sid.values() if parse_sid_tokens(sid))
+    valid_sid_parse_rate = rate(sid_parse_success, len(item2sid))
 
     report = {
         "category": args.category,
         "sid_version": args.sid_version,
         "method": "residual_minibatch_kmeans",
+        "canonical_output_layout": True,
+        "output_dir": output_dir.as_posix(),
+        "overwrite": bool(args.overwrite),
         "emb_path": args.emb_path.as_posix(),
+        "item_json": item_json.as_posix(),
         "emb_shape": [int(dim) for dim in embeddings_raw.shape],
         "emb_dtype": str(embeddings_raw.dtype),
         "embedding_normalization": args.normalize,
@@ -434,12 +566,18 @@ def main() -> None:
         "num_items": num_items,
         "num_levels": args.num_levels,
         "codebook_size": args.codebook_size,
+        "dedup_mode": args.dedup_mode,
+        "pre_dedup": pre_dedup_metrics,
+        "post_dedup": post_dedup_metrics,
+        "dedup": dedup_report,
         "actual_clusters_by_level": actual_clusters,
         "level_unique_codes": unique_codes,
-        "num_unique_sid": metrics["num_unique_sid"],
-        "collision_rate": metrics["collision_rate"],
-        "collided_item_rate": metrics["collided_item_rate"],
-        "max_bucket_size": metrics["max_bucket_size"],
+        "num_unique_sid": post_dedup_metrics["num_unique_sid"],
+        "valid_sid_parse_rate": valid_sid_parse_rate,
+        "collision_rate": post_dedup_metrics["collision_rate"],
+        "collided_item_rate": post_dedup_metrics["collided_item_rate"],
+        "max_bucket_size": post_dedup_metrics["max_bucket_size"],
+        "num_collision_buckets": post_dedup_metrics["num_collision_buckets"],
         "reconstruction_mse": reconstruction_mse,
         "residual_norm_by_level": residual_norms,
         "item_order_ok": item_order_ok,
@@ -454,7 +592,7 @@ def main() -> None:
             "seed": args.seed,
             "batch_size": args.batch_size,
         },
-        "generated_manifest": args.generated_manifest.as_posix(),
+        "generated_manifest": args.generated_manifest.as_posix() if args.generated_manifest is not None else "not_written",
         "output_paths": path_strings,
         "warnings": warnings,
     }
