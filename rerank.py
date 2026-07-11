@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-jsonl", type=Path, required=True)
     parser.add_argument("--train-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--eval-split", choices=["valid", "test"], default="test")
     parser.add_argument("--item-emb", type=Path, default=None)
     parser.add_argument("--row-index", type=Path, default=None)
     parser.add_argument("--topk", type=int, nargs="+", default=[1, 3, 5, 10, 20, 50, 100])
@@ -295,6 +296,7 @@ def main() -> None:
     report = {
         "inputs": {
             "candidate_jsonl": args.candidate_jsonl.as_posix(),
+            "eval_split": args.eval_split,
             "train_csv": args.train_csv.as_posix(),
             "item_emb": args.item_emb.as_posix() if args.item_emb else NOT_AVAILABLE,
             "row_index": args.row_index.as_posix() if args.row_index else NOT_AVAILABLE,

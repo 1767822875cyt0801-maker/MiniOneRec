@@ -315,7 +315,9 @@ def consistency_checks(rows: list[dict[str, Any]], artifacts: list[dict[str, Any
     rerank_source = Path("rerank.py").read_text(encoding="utf-8") if Path("rerank.py").exists() else ""
     add_check(
         "rerank uses train CSV popularity",
-        "train_popularity(args.train_csv)" in rerank_source and "valid" not in rerank_source.lower(),
+        "train_popularity(args.train_csv)" in rerank_source
+        and "train_popularity(args.eval" not in rerank_source
+        and "train_popularity(args.test" not in rerank_source,
         "checked rerank.py train_popularity path",
     )
     add_check(

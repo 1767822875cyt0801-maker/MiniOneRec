@@ -25,7 +25,14 @@ NOT_AVAILABLE = "not_available"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Expand predicted SIDs to item candidates.")
     parser.add_argument("--prediction-file", type=Path, required=True)
-    parser.add_argument("--test-csv", type=Path, required=True)
+    parser.add_argument("--eval-csv", type=Path, default=None, help="Evaluation CSV for the selected split.")
+    parser.add_argument(
+        "--test-csv",
+        type=Path,
+        default=None,
+        help="Backward-compatible alias for --eval-csv.",
+    )
+    parser.add_argument("--eval-split", choices=["valid", "test"], default=None)
     parser.add_argument("--item2sid", type=Path, required=True)
     parser.add_argument("--sid2items", type=Path, required=True)
     parser.add_argument("--valid-sid-set", type=Path, required=True)
@@ -46,12 +53,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow prefix expansion for parsed but invalid predicted SIDs. Default keeps invalid predictions from expanding.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.eval_csv is None:
+        args.eval_csv = args.test_csv
+    elif args.test_csv is not None and args.test_csv != args.eval_csv:
+        parser.error("--eval-csv and --test-csv were both provided with different paths")
+    if args.eval_csv is None:
+        parser.error("--eval-csv is required")
+    if args.eval_split is None:
+        args.eval_split = infer_eval_split(args.eval_csv)
+    return args
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with open(path, "r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
+
+
+def infer_eval_split(path: Path) -> str:
+    path_text = path.as_posix().lower()
+    if "/valid" in path_text or "valid.csv" in path_text or "validation" in path_text:
+        return "valid"
+    return "test"
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -306,16 +329,16 @@ def main() -> None:
     topk = sorted(set(k for k in args.topk if k > 0))
     prefix_levels = sorted(set(level for level in args.prefix_levels if level > 0), reverse=True)
     predictions = load_predictions(args.prediction_file)
-    test_rows = read_csv_rows(args.test_csv)
+    eval_rows = read_csv_rows(args.eval_csv)
     sid2items = normalize_sid2items(args.sid2items)
     valid_sid_set = {normalize_sid(sid) for sid in load_json_set(args.valid_sid_set)}
     item2sid_raw = load_json(args.item2sid)
     item2sid = {str(item_id): normalize_sid(str(sid)) for item_id, sid in item2sid_raw.items()}
     prefix_to_sids = build_prefix_to_sids(sid2items, prefix_levels)
 
-    if len(predictions) != len(test_rows):
+    if len(predictions) != len(eval_rows):
         raise ValueError(
-            f"prediction/test row count mismatch: predictions={len(predictions)}, test_rows={len(test_rows)}"
+            f"prediction/eval row count mismatch: predictions={len(predictions)}, eval_rows={len(eval_rows)}"
         )
 
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -329,7 +352,7 @@ def main() -> None:
     target_in_pool_count = 0
 
     with open(args.output_jsonl, "w", encoding="utf-8") as f:
-        for idx, (pred, row) in enumerate(zip(predictions, test_rows)):
+        for idx, (pred, row) in enumerate(zip(predictions, eval_rows)):
             target_item_id = str(row.get("item_id", "")).strip()
             history_item_ids = [str(item_id) for item_id in parse_list(row.get("history_item_id", ""))]
             history_item_sids = [clean_sid(sid) for sid in parse_list(row.get("history_item_sid", ""))]
@@ -411,7 +434,8 @@ def main() -> None:
     report = {
         "inputs": {
             "prediction_file": args.prediction_file.as_posix(),
-            "test_csv": args.test_csv.as_posix(),
+            "eval_csv": args.eval_csv.as_posix(),
+            "eval_split": args.eval_split,
             "item2sid": args.item2sid.as_posix(),
             "sid2items": args.sid2items.as_posix(),
             "valid_sid_set": args.valid_sid_set.as_posix(),

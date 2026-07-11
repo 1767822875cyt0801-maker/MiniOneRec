@@ -43,7 +43,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fuse two SID candidate streams at item level.")
     parser.add_argument("--text-candidates", type=Path, required=True)
     parser.add_argument("--behavior-candidates", type=Path, required=True)
-    parser.add_argument("--test-csv", type=Path, required=True)
+    parser.add_argument("--eval-csv", type=Path, default=None, help="Evaluation CSV for the selected split.")
+    parser.add_argument(
+        "--test-csv",
+        type=Path,
+        default=None,
+        help="Backward-compatible alias for --eval-csv.",
+    )
+    parser.add_argument("--eval-split", choices=["valid", "test"], default=None)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--ks", type=int, nargs="+", default=[1, 3, 5, 10, 20, 50])
     parser.add_argument("--lambda-text", type=float, default=0.5)
@@ -52,7 +59,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--behavior-name", default="behavior")
     parser.add_argument("--dedup-by-item", default="true", choices=["true", "false"])
     parser.add_argument("--schema-sample-size", type=int, default=3)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.eval_csv is None:
+        args.eval_csv = args.test_csv
+    elif args.test_csv is not None and args.test_csv != args.eval_csv:
+        parser.error("--eval-csv and --test-csv were both provided with different paths")
+    if args.eval_csv is None:
+        parser.error("--eval-csv is required")
+    if args.eval_split is None:
+        args.eval_split = infer_eval_split(args.eval_csv)
+    return args
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -68,6 +84,13 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with open(path, "r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
+
+
+def infer_eval_split(path: Path) -> str:
+    path_text = path.as_posix().lower()
+    if "/valid" in path_text or "valid.csv" in path_text or "validation" in path_text:
+        return "valid"
+    return "test"
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -140,8 +163,8 @@ def parse_row_index(value: Any) -> int | None:
         return None
 
 
-def test_targets(test_csv: Path) -> dict[str, str]:
-    rows = read_csv_rows(test_csv)
+def eval_targets(eval_csv: Path) -> dict[str, str]:
+    rows = read_csv_rows(eval_csv)
     targets: dict[str, str] = {}
     for idx, row in enumerate(rows):
         targets[str(idx)] = str(row.get("item_id", "")).strip()
@@ -197,7 +220,7 @@ def normalize_nested_record(
     history = [str(item_id) for item_id in record.get("history_item_id", [])] if isinstance(record.get("history_item_id"), list) else []
 
     field_mapping.setdefault("sample_id", sample_field or "file_order")
-    field_mapping.setdefault("target_item_id", target_field or "test_csv_by_sample_id")
+    field_mapping.setdefault("target_item_id", target_field or "eval_csv_by_sample_id")
     field_mapping.setdefault("candidate_items", "candidate_item_ids")
     field_mapping.setdefault("rank", "list_order_1_based")
 
@@ -251,7 +274,7 @@ def normalize_flat_records(
             )
         rank_field = choose_field(first, ["rank", "candidate_rank", "candidate_rank_1_based", "rank_1_based"])
         rank0_field = choose_field(first, ["rank_0_based", "candidate_rank_0_based"])
-        field_mapping.setdefault("target_item_id", target_field or "test_csv_by_sample_id")
+        field_mapping.setdefault("target_item_id", target_field or "eval_csv_by_sample_id")
         field_mapping.setdefault("candidate_items", candidate_field)
         field_mapping.setdefault("rank", rank_field or rank0_field or "sample_order_1_based")
 
@@ -650,7 +673,8 @@ def write_markdown_report(out_dir: Path, report: dict[str, Any]) -> None:
         "",
         f"- Text candidates: `{report['inputs']['text_candidates']}`",
         f"- Behavior candidates: `{report['inputs']['behavior_candidates']}`",
-        f"- Test CSV: `{report['inputs']['test_csv']}`",
+            f"- Eval split: `{report['inputs']['eval_split']}`",
+            f"- Eval CSV: `{report['inputs']['eval_csv']}`",
         "",
         "## Key Diagnostics",
         "",
@@ -700,7 +724,7 @@ def main() -> None:
     args = parse_args()
     ks = sorted(set(k for k in args.ks if k > 0))
     dedup_by_item = args.dedup_by_item.lower() == "true"
-    targets = test_targets(args.test_csv)
+    targets = eval_targets(args.eval_csv)
     text_samples, text_schema = load_candidate_samples(args.text_candidates, targets, dedup_by_item)
     behavior_samples, behavior_schema = load_candidate_samples(args.behavior_candidates, targets, dedup_by_item)
     sample_ids = sorted(set(text_samples) | set(behavior_samples), key=item_sort_key)
@@ -747,7 +771,8 @@ def main() -> None:
         "inputs": {
             "text_candidates": args.text_candidates.as_posix(),
             "behavior_candidates": args.behavior_candidates.as_posix(),
-            "test_csv": args.test_csv.as_posix(),
+            "eval_csv": args.eval_csv.as_posix(),
+            "eval_split": args.eval_split,
             "text_name": args.text_name,
             "behavior_name": args.behavior_name,
         },

@@ -34,7 +34,9 @@ RESERVED_METRICS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Enhanced SID-level evaluation for MiniOneRec predictions.")
     parser.add_argument("--prediction-file", type=Path, required=True)
-    parser.add_argument("--test-csv", type=Path, default=None)
+    parser.add_argument("--eval-csv", type=Path, default=None, help="Evaluation CSV for the selected split.")
+    parser.add_argument("--test-csv", type=Path, default=None, help="Backward-compatible alias for --eval-csv.")
+    parser.add_argument("--eval-split", choices=["valid", "test"], default=None)
     parser.add_argument("--item2sid", type=Path, default=None)
     parser.add_argument("--sid2items", type=Path, default=None)
     parser.add_argument("--valid-sid-set", type=Path, required=True)
@@ -47,7 +49,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--short-history-max-len", type=int, default=None)
     parser.add_argument("--sid-version", default="text")
     parser.add_argument("--prefix-levels", type=int, nargs="+", default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.eval_csv is None:
+        args.eval_csv = args.test_csv
+    elif args.test_csv is not None and args.test_csv != args.eval_csv:
+        parser.error("--eval-csv and --test-csv were both provided with different paths")
+    if args.eval_split is None and args.eval_csv is not None:
+        args.eval_split = infer_eval_split(args.eval_csv)
+    if args.eval_split is None:
+        args.eval_split = "test"
+    return args
+
+
+def infer_eval_split(path: Path) -> str:
+    path_text = path.as_posix().lower()
+    if "/valid" in path_text or "valid.csv" in path_text or "validation" in path_text:
+        return "valid"
+    return "test"
 
 
 def item_sort_key(value: Any) -> tuple[int, int | str]:
@@ -315,9 +333,9 @@ def assign_popularity_groups(
     return groups
 
 
-def enrich_with_test_alignment(
+def enrich_with_eval_alignment(
     prediction_records: list[dict[str, Any]],
-    test_rows: list[dict[str, str]],
+    eval_rows: list[dict[str, str]],
     train_rows: list[dict[str, str]],
     item2sid: dict[str, str],
     topk: list[int],
@@ -325,29 +343,29 @@ def enrich_with_test_alignment(
     tail_ratio: float,
     short_history_max_len: int | None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    if not test_rows:
-        return {"available": False, "reason": "test_csv not provided or empty"}, []
-    if len(test_rows) != len(prediction_records):
+    if not eval_rows:
+        return {"available": False, "reason": "eval_csv not provided or empty"}, []
+    if len(eval_rows) != len(prediction_records):
         return {
             "available": False,
-            "reason": f"prediction/test_csv length mismatch: {len(prediction_records)} != {len(test_rows)}",
+            "reason": f"prediction/eval_csv length mismatch: {len(prediction_records)} != {len(eval_rows)}",
         }, []
     if not train_rows:
         return {"available": False, "reason": "train_csv not provided or empty"}, []
 
     target_counts, history_counts, train_parse_errors = build_train_frequency(train_rows)
     item_universe = set(item2sid) if item2sid else set(target_counts) | set(history_counts)
-    for row in test_rows:
+    for row in eval_rows:
         item_id = str(row.get("item_id", "")).strip()
         if item_id:
             item_universe.add(item_id)
     popularity_groups = assign_popularity_groups(item_universe, target_counts, history_counts, head_ratio, tail_ratio)
 
     history_lengths: list[int] = []
-    test_parse_errors: list[dict[str, str]] = []
+    eval_parse_errors: list[dict[str, str]] = []
     aligned_meta: list[dict[str, Any]] = []
     target_sid_mismatch_count = 0
-    for idx, (record, row) in enumerate(zip(prediction_records, test_rows)):
+    for idx, (record, row) in enumerate(zip(prediction_records, eval_rows)):
         item_id = str(row.get("item_id", "")).strip()
         csv_target_sid = clean_sid(row.get("item_sid", ""))
         if csv_target_sid and csv_target_sid != record["target_sid"]:
@@ -356,8 +374,8 @@ def enrich_with_test_alignment(
         history_ids, error = parse_list(row.get("history_item_id", "[]"))
         if error:
             history_ids = []
-            if len(test_parse_errors) < 20:
-                test_parse_errors.append({"row_index": str(idx), "history_item_id_error": error})
+            if len(eval_parse_errors) < 20:
+                eval_parse_errors.append({"row_index": str(idx), "history_item_id_error": error})
         history_len = len(history_ids)
         history_lengths.append(history_len)
         total_train_count = int(target_counts.get(item_id, 0) + history_counts.get(item_id, 0))
@@ -389,7 +407,7 @@ def enrich_with_test_alignment(
         "history_length_threshold": threshold,
         "history_length_threshold_source": threshold_source,
         "train_parse_error_samples": train_parse_errors,
-        "test_parse_error_samples": test_parse_errors,
+        "eval_parse_error_samples": eval_parse_errors,
         "popularity": compute_group_metrics(prediction_records, "popularity_group", ["head", "mid", "tail"], topk),
         "cold_warm": compute_group_metrics(prediction_records, "cold_warm_group", ["cold", "warm"], topk),
         "history_length": compute_group_metrics(prediction_records, "history_length_group", ["short", "long"], topk),
@@ -526,12 +544,12 @@ def main() -> None:
     prediction_records = load_predictions(args.prediction_file)
     prefix_levels = infer_prefix_levels(valid_sid_set, prediction_records, args.prefix_levels)
 
-    test_rows, test_errors = read_csv_rows(args.test_csv)
+    eval_rows, eval_errors = read_csv_rows(args.eval_csv)
     train_rows, train_errors = read_csv_rows(args.train_csv)
     core_metrics = evaluate_predictions(prediction_records, valid_sid_set, sid2items, topk, prefix_levels)
-    group_metrics, _ = enrich_with_test_alignment(
+    group_metrics, _ = enrich_with_eval_alignment(
         prediction_records,
-        test_rows,
+        eval_rows,
         train_rows,
         item2sid,
         topk,
@@ -542,9 +560,11 @@ def main() -> None:
 
     report = {
         "sid_version": args.sid_version,
+        "eval_split": args.eval_split,
         "inputs": {
             "prediction_file": args.prediction_file.as_posix(),
-            "test_csv": args.test_csv.as_posix() if args.test_csv else NOT_AVAILABLE,
+            "eval_csv": args.eval_csv.as_posix() if args.eval_csv else NOT_AVAILABLE,
+            "eval_split": args.eval_split,
             "item2sid": args.item2sid.as_posix() if args.item2sid else NOT_AVAILABLE,
             "sid2items": args.sid2items.as_posix() if args.sid2items else NOT_AVAILABLE,
             "valid_sid_set": args.valid_sid_set.as_posix(),
@@ -553,7 +573,7 @@ def main() -> None:
         "topk": topk,
         "prefix_levels": prefix_levels,
         "errors": {
-            "test_csv": test_errors,
+            "eval_csv": eval_errors,
             "train_csv": train_errors,
             "item2sid": item2sid_errors,
             "sid2items": sid2items_errors,
