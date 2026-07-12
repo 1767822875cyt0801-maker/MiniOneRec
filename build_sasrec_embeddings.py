@@ -24,12 +24,12 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 
 
-DEFAULT_TOPK = [10, 20, 50]
+DEFAULT_TOPK = [1, 10, 20, 50]
 NOT_AVAILABLE = "not_available"
 
 
@@ -37,6 +37,10 @@ NOT_AVAILABLE = "not_available"
 class SequenceExample:
     input_ids: list[int]
     target_ids: list[int]
+
+
+class NonFiniteTensorError(RuntimeError):
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-rows", type=int, default=0)
     parser.add_argument("--max-valid-rows", type=int, default=0)
     parser.add_argument("--normalization", choices=["l2", "none"], default="l2")
+    parser.add_argument("--debug-valid-samples", type=int, default=10)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -159,12 +164,12 @@ def shifted_example(sequence: list[int], max_seq_len: int) -> SequenceExample | 
     pad = max_seq_len - len(inputs)
     if pad < 0:
         raise ValueError("shifted sequence exceeds max_seq_len")
-    return SequenceExample(input_ids=[0] * pad + inputs, target_ids=[0] * pad + targets)
+    return SequenceExample(input_ids=inputs + [0] * pad, target_ids=targets + [0] * pad)
 
 
 def valid_input(sequence: list[int], max_seq_len: int) -> list[int]:
     trimmed = sequence[-max_seq_len:]
-    return [0] * (max_seq_len - len(trimmed)) + trimmed
+    return trimmed + [0] * (max_seq_len - len(trimmed))
 
 
 def causal_attention_mask(max_seq_len: int) -> np.ndarray:
@@ -243,7 +248,13 @@ def prepare_export_matrix(
 
 
 def compute_metrics(ranks: list[int | None], topk: list[int]) -> dict[str, Any]:
-    out: dict[str, Any] = {"num_samples": len(ranks)}
+    ranked = [rank for rank in ranks if rank is not None]
+    out: dict[str, Any] = {
+        "num_samples": len(ranks),
+        "num_ranked_samples": len(ranked),
+        "num_unranked_samples": len(ranks) - len(ranked),
+        "unranked_samples": len(ranks) - len(ranked),
+    }
     for k in sorted(set(topk)):
         hits = 0
         ndcg = 0.0
@@ -253,7 +264,176 @@ def compute_metrics(ranks: list[int | None], topk: list[int]) -> dict[str, Any]:
                 ndcg += 1.0 / math.log2(rank + 2)
         out[f"hr@{k}"] = 0.0 if not ranks else hits / len(ranks)
         out[f"ndcg@{k}"] = 0.0 if not ranks else ndcg / len(ranks)
+    out["mrr"] = 0.0 if not ranks else sum(0.0 if rank is None else 1.0 / (rank + 1) for rank in ranks) / len(ranks)
     return out
+
+
+def rank_from_scores(scores: Iterable[float], target_index: int) -> tuple[int | None, int, list[int]]:
+    """Return a safe 0-based full-candidate rank and top-10 row indices.
+
+    Ties are handled pessimistically so all-equal or tied scores cannot turn
+    every target into rank 0. Non-finite rows are treated as unrankable instead
+    of being silently counted as hits.
+    """
+    values = np.asarray(list(scores), dtype=np.float64)
+    candidate_count = int(values.shape[0])
+    if target_index < 0 or target_index >= candidate_count:
+        return None, candidate_count, []
+    if not np.isfinite(values).all():
+        return None, candidate_count, []
+    target_score = float(values[target_index])
+    rank = int((values >= target_score).sum() - 1)
+    order = np.lexsort((np.arange(candidate_count), -values))
+    return rank, candidate_count, [int(idx) for idx in order[:10]]
+
+
+def candidate_summary(candidate_counts: list[int], expected_count: int) -> dict[str, Any]:
+    if not candidate_counts:
+        return {
+            "candidate_count_expected": expected_count,
+            "candidate_count_min": 0,
+            "candidate_count_max": 0,
+            "candidate_count_all_full": False,
+        }
+    return {
+        "candidate_count_expected": expected_count,
+        "candidate_count_min": min(candidate_counts),
+        "candidate_count_max": max(candidate_counts),
+        "candidate_count_all_full": all(count == expected_count for count in candidate_counts),
+    }
+
+
+def build_valid_diagnostics(
+    rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    max_seq_len: int,
+    ranks: list[int | None] | None = None,
+    top10_rows: list[list[int]] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows[: max(0, limit)]):
+        history_items = [str(item) for item in parse_list(row.get("history_item_id", ""))]
+        history_seq = row_sequence(row, row_index, include_target=False)
+        target_item = str(row.get("item_id", "")).strip()
+        target_internal = to_internal_id(target_item, row_index)
+        input_ids = valid_input(history_seq, max_seq_len) if history_seq else [0] * max_seq_len
+        history_length = sum(1 for value in input_ids if value != 0)
+        target_in_input = target_internal in input_ids if target_internal is not None else False
+        top10 = []
+        if top10_rows is not None and idx < len(top10_rows):
+            top10 = [item_order[row_idx] for row_idx in top10_rows[idx]]
+        diagnostics.append(
+            {
+                "row": idx,
+                "history": history_items,
+                "target": target_item,
+                "input": input_ids,
+                "input_last": input_ids[-1] if input_ids else None,
+                "input_last_valid": input_ids[history_length - 1] if history_length else None,
+                "history_length": history_length,
+                "target_in_input": target_in_input,
+                "valid_candidate_count": len(row_index),
+                "target_rank": None if ranks is None or idx >= len(ranks) else ranks[idx],
+                "top10": top10,
+            }
+        )
+    return diagnostics
+
+
+def print_valid_diagnostics(diagnostics: list[dict[str, Any]], label: str) -> None:
+    if diagnostics:
+        print(f"{label}:")
+        for sample in diagnostics:
+            print(json.dumps(sample, ensure_ascii=False, sort_keys=True))
+
+
+def evaluate_score_rows(
+    score_rows: Iterable[Iterable[float] | None],
+    valid_rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    args: argparse.Namespace,
+    debug_limit: int = 0,
+) -> dict[str, Any]:
+    ranks: list[int | None] = []
+    candidate_counts: list[int] = []
+    top10_rows: list[list[int]] = []
+    finite_score_samples = 0
+    nonfinite_score_samples = 0
+    for score_row, row in zip(score_rows, valid_rows):
+        target = to_internal_id(row.get("item_id", ""), row_index)
+        if target is None or score_row is None:
+            ranks.append(None)
+            candidate_counts.append(len(row_index))
+            top10_rows.append([])
+            continue
+        values = np.asarray(list(score_row), dtype=np.float64)
+        if np.isfinite(values).all():
+            finite_score_samples += 1
+        else:
+            nonfinite_score_samples += 1
+        rank, candidate_count, top10 = rank_from_scores(values, target - 1)
+        ranks.append(rank)
+        candidate_counts.append(candidate_count)
+        top10_rows.append(top10)
+    metrics = compute_metrics(ranks, args.topk)
+    metrics.update(candidate_summary(candidate_counts, len(row_index)))
+    metrics["finite_score_samples"] = finite_score_samples
+    metrics["nonfinite_score_samples"] = nonfinite_score_samples
+    if debug_limit:
+        diagnostics = build_valid_diagnostics(
+            valid_rows,
+            row_index,
+            item_order,
+            args.max_seq_len,
+            ranks=ranks,
+            top10_rows=top10_rows,
+            limit=debug_limit,
+        )
+        metrics["debug_valid_samples"] = diagnostics
+        print_valid_diagnostics(diagnostics, "VALID_DEBUG_SAMPLES")
+    return metrics
+
+
+def assert_valid_evaluation_complete(metrics: dict[str, Any], stage: str) -> None:
+    nonfinite = int(metrics.get("nonfinite_score_samples", 0))
+    unranked = int(metrics.get("unranked_samples", metrics.get("num_unranked_samples", 0)))
+    candidate_count_all_full = bool(metrics.get("candidate_count_all_full", False))
+    if nonfinite or unranked or not candidate_count_all_full:
+        details = {
+            "stage": stage,
+            "nonfinite_score_samples": nonfinite,
+            "unranked_samples": unranked,
+            "candidate_count_min": metrics.get("candidate_count_min"),
+            "candidate_count_max": metrics.get("candidate_count_max"),
+            "candidate_count_expected": metrics.get("candidate_count_expected"),
+            "candidate_count_all_full": candidate_count_all_full,
+        }
+        raise SystemExit("Invalid SASRec valid evaluation; refusing to export artifacts: " + json.dumps(details, sort_keys=True))
+
+
+def random_baseline_metrics(
+    valid_rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    rng = np.random.default_rng(args.seed)
+    score_rows = (rng.standard_normal(len(row_index)) for _ in valid_rows)
+    return evaluate_score_rows(score_rows, valid_rows, row_index, item_order, args)
+
+
+def popularity_baseline_metrics(
+    valid_rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    train_counts: dict[str, int],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    scores = np.asarray([float(train_counts.get(item_id, 0)) for item_id in item_order], dtype=np.float64)
+    return evaluate_score_rows((scores for _ in valid_rows), valid_rows, row_index, item_order, args)
 
 
 def torch_available() -> tuple[bool, str]:
@@ -278,6 +458,52 @@ def set_seed(seed: int) -> None:
         pass
 
 
+def finite_context(input_ids: Any, epoch: int | None = None, batch_index: int | None = None) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    if epoch is not None:
+        context["epoch"] = epoch
+    if batch_index is not None:
+        context["batch"] = batch_index
+    try:
+        lengths = input_ids.ne(0).sum(dim=1).detach().cpu().tolist()
+        padding = input_ids.eq(0).sum(dim=1).detach().cpu().tolist()
+        context["history_lengths"] = [int(value) for value in lengths]
+        context["padding_counts"] = [int(value) for value in padding]
+    except Exception:
+        pass
+    return context
+
+
+def assert_torch_finite(tensor: Any, stage: str, context: dict[str, Any] | None = None) -> None:
+    import torch  # type: ignore
+
+    if torch.isfinite(tensor).all():
+        return
+    finite = torch.isfinite(tensor)
+    bad = (~finite).nonzero(as_tuple=False)
+    details: dict[str, Any] = {
+        "stage": stage,
+        "shape": list(tensor.shape),
+        "nonfinite_count": int((~finite).sum().detach().cpu().item()),
+    }
+    if context:
+        details.update(context)
+    if bad.numel():
+        details["first_nonfinite_index"] = [int(value) for value in bad[0].detach().cpu().tolist()]
+    raise NonFiniteTensorError("Non-finite SASRec tensor: " + json.dumps(details, sort_keys=True))
+
+
+def assert_model_parameters_finite(model: Any, stage: str, context: dict[str, Any] | None = None) -> None:
+    for name, parameter in model.named_parameters():
+        assert_torch_finite(parameter, f"{stage}.parameter.{name}", context)
+
+
+def assert_model_gradients_finite(model: Any, stage: str, context: dict[str, Any] | None = None) -> None:
+    for name, parameter in model.named_parameters():
+        if parameter.grad is not None:
+            assert_torch_finite(parameter.grad, f"{stage}.gradient.{name}", context)
+
+
 def build_torch_model(num_items: int, args: argparse.Namespace):
     import torch  # type: ignore
     from torch import nn
@@ -287,26 +513,64 @@ def build_torch_model(num_items: int, args: argparse.Namespace):
             super().__init__()
             self.item_embedding = nn.Embedding(num_items + 1, args.embedding_dim, padding_idx=0)
             self.position_embedding = nn.Embedding(args.max_seq_len, args.embedding_dim)
-            layer = nn.TransformerEncoderLayer(
-                d_model=args.embedding_dim,
-                nhead=args.num_heads,
-                dim_feedforward=args.embedding_dim * 4,
-                dropout=args.dropout,
-                batch_first=True,
-                norm_first=True,
+            self.layers = nn.ModuleList(
+                [
+                    nn.TransformerEncoderLayer(
+                        d_model=args.embedding_dim,
+                        nhead=args.num_heads,
+                        dim_feedforward=args.embedding_dim * 4,
+                        dropout=args.dropout,
+                        batch_first=True,
+                        norm_first=True,
+                    )
+                    for _ in range(args.num_layers)
+                ]
             )
-            self.encoder = nn.TransformerEncoder(layer, num_layers=args.num_layers)
             self.layer_norm = nn.LayerNorm(args.embedding_dim)
 
-        def forward(self, input_ids):
+        def encode(self, input_ids, check_finite=False, finite_context=None):
             batch, seq_len = input_ids.shape
             positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch, seq_len)
-            hidden = self.item_embedding(input_ids) + self.position_embedding(positions)
+            item_hidden = self.item_embedding(input_ids)
+            if check_finite:
+                assert_torch_finite(item_hidden, "input_embedding", finite_context)
+            position_hidden = self.position_embedding(positions)
+            if check_finite:
+                assert_torch_finite(position_hidden, "positional_embedding", finite_context)
+            hidden = item_hidden + position_hidden
             padding_mask = input_ids.eq(0)
+            hidden = hidden.masked_fill(padding_mask.unsqueeze(-1), 0.0)
             causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=1)
-            hidden = self.encoder(hidden, mask=causal_mask, src_key_padding_mask=padding_mask)
+            for layer_index, layer in enumerate(self.layers):
+                hidden = layer(hidden, src_mask=causal_mask, src_key_padding_mask=padding_mask)
+                hidden = hidden.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+                if check_finite:
+                    assert_torch_finite(hidden, f"transformer_layer_{layer_index}_output", finite_context)
             hidden = self.layer_norm(hidden)
+            hidden = hidden.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+            if check_finite:
+                assert_torch_finite(hidden, "encoder_output", finite_context)
+            return hidden
+
+        def forward(self, input_ids, check_finite=False, finite_context=None):
+            hidden = self.encode(input_ids, check_finite=check_finite, finite_context=finite_context)
             logits = hidden @ self.item_embedding.weight[1:].t()
+            if check_finite:
+                assert_torch_finite(logits, "logits", finite_context)
+            return logits
+
+        def last_valid_logits(self, input_ids, check_finite=False, finite_context=None):
+            hidden = self.encode(input_ids, check_finite=check_finite, finite_context=finite_context)
+            lengths = input_ids.ne(0).sum(dim=1)
+            if torch.any(lengths <= 0):
+                raise ValueError("last_valid_logits requires at least one non-padding input per row")
+            gather_index = (lengths - 1).view(-1, 1, 1).expand(-1, 1, hidden.shape[-1])
+            last_hidden = hidden.gather(1, gather_index).squeeze(1)
+            if check_finite:
+                assert_torch_finite(last_hidden, "last_valid_hidden", finite_context)
+            logits = last_hidden @ self.item_embedding.weight[1:].t()
+            if check_finite:
+                assert_torch_finite(logits, "logits", finite_context)
             return logits
 
     return MiniSASRec()
@@ -321,7 +585,13 @@ def batch_iter(examples: list[SequenceExample], batch_size: int, shuffle: bool, 
         yield [examples[idx] for idx in order[start : start + batch_size]]
 
 
-def train_model(examples: list[SequenceExample], valid_rows: list[dict[str, str]], row_index: dict[str, int], args: argparse.Namespace):
+def train_model(
+    examples: list[SequenceExample],
+    valid_rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    args: argparse.Namespace,
+):
     import torch  # type: ignore
     import torch.nn.functional as F  # type: ignore
 
@@ -331,24 +601,30 @@ def train_model(examples: list[SequenceExample], valid_rows: list[dict[str, str]
     best_metric = -1.0
     best_epoch = 0
     history_rows: list[dict[str, Any]] = []
+    assert_model_parameters_finite(model, "initial")
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
         total_tokens = 0
-        for batch in batch_iter(examples, args.batch_size, shuffle=True, seed=args.seed + epoch):
+        for batch_index, batch in enumerate(batch_iter(examples, args.batch_size, shuffle=True, seed=args.seed + epoch), start=1):
             inputs = torch.tensor([ex.input_ids for ex in batch], dtype=torch.long, device=args.device)
             targets = torch.tensor([ex.target_ids for ex in batch], dtype=torch.long, device=args.device)
-            logits = model(inputs)
+            context = finite_context(inputs, epoch=epoch, batch_index=batch_index)
+            logits = model(inputs, check_finite=True, finite_context=context)
             mask = targets.gt(0)
             if not mask.any():
                 continue
             loss = F.cross_entropy(logits[mask], targets[mask] - 1)
+            assert_torch_finite(loss, "loss", context)
             optimizer.zero_grad()
             loss.backward()
+            assert_model_gradients_finite(model, "backward", context)
             optimizer.step()
+            assert_model_parameters_finite(model, "optimizer_step", context)
             total_loss += float(loss.detach().cpu()) * int(mask.sum().item())
             total_tokens += int(mask.sum().item())
-        metrics = evaluate_model(model, valid_rows, row_index, args)
+        metrics = evaluate_model(model, valid_rows, row_index, item_order, args)
+        assert_valid_evaluation_complete(metrics, f"epoch_{epoch}_valid")
         metric_value = float(metrics.get(args.checkpoint_metric, 0.0))
         if metric_value > best_metric:
             best_metric = metric_value
@@ -366,24 +642,33 @@ def train_model(examples: list[SequenceExample], valid_rows: list[dict[str, str]
     return model, {"best_epoch": best_epoch, "best_metric": best_metric, "history": history_rows}
 
 
-def evaluate_model(model: Any, valid_rows: list[dict[str, str]], row_index: dict[str, int], args: argparse.Namespace) -> dict[str, Any]:
+def evaluate_model(
+    model: Any,
+    valid_rows: list[dict[str, str]],
+    row_index: dict[str, int],
+    item_order: list[str],
+    args: argparse.Namespace,
+    debug_limit: int = 0,
+) -> dict[str, Any]:
     import torch  # type: ignore
 
     model.eval()
-    ranks: list[int | None] = []
+    score_rows: list[np.ndarray | None] = []
     with torch.no_grad():
         for row in valid_rows:
             history_seq = row_sequence(row, row_index, include_target=False)
             target = to_internal_id(row.get("item_id", ""), row_index)
             if not history_seq or target is None:
-                ranks.append(None)
+                score_rows.append(None)
                 continue
             inputs = torch.tensor([valid_input(history_seq, args.max_seq_len)], dtype=torch.long, device=args.device)
-            logits = model(inputs)[0, -1]
-            target_score = logits[target - 1]
-            rank = int((logits > target_score).sum().item())
-            ranks.append(rank)
-    return compute_metrics(ranks, args.topk)
+            logits = model.last_valid_logits(
+                inputs,
+                check_finite=True,
+                finite_context=finite_context(inputs),
+            )[0]
+            score_rows.append(logits.detach().cpu().numpy())
+    return evaluate_score_rows(score_rows, valid_rows, row_index, item_order, args, debug_limit=debug_limit)
 
 
 def git_info() -> dict[str, Any]:
@@ -467,6 +752,10 @@ def main() -> None:
     valid_rows = read_csv_rows(args.valid_csv, args.max_valid_rows)
     examples = build_examples(train_rows, row_index, args.max_seq_len)
     counts = train_item_counts(train_rows, row_index, item_order)
+    baselines = {
+        "random_untrained": random_baseline_metrics(valid_rows, row_index, item_order, args),
+        "popularity": popularity_baseline_metrics(valid_rows, row_index, item_order, counts, args),
+    }
     config = {
         "category": args.category,
         "train_csv": args.train_csv.as_posix(),
@@ -489,7 +778,17 @@ def main() -> None:
         "num_train_examples": len(examples),
         "num_valid_rows": len(valid_rows),
         "padding_id": 0,
+        "padding_side": "right",
         "internal_id_contract": "internal_id = canonical_row_index[item_id] + 1",
+        "evaluation_contract": {
+            "split": "valid",
+            "candidate_set": "all canonical item_order rows",
+            "candidate_count": len(item_order),
+            "valid_input_includes_target": False,
+            "valid_hidden_state": "gather length-1 last non-padding history position",
+            "rank_tie_policy": "pessimistic: rank = count(score >= target_score) - 1",
+            "non_finite_scores": "unranked, never counted as hit",
+        },
     }
     available, torch_status = torch_available()
     print(
@@ -499,6 +798,13 @@ def main() -> None:
     )
     if args.dry_run:
         print(f"DRY_RUN: output_dir={args.output_dir}")
+        print(f"DRY_RUN: valid_candidate_count={len(item_order)}")
+        print_valid_diagnostics(
+            build_valid_diagnostics(valid_rows, row_index, item_order, args.max_seq_len, limit=args.debug_valid_samples),
+            "DRY_RUN_VALID_INPUT_DEBUG",
+        )
+        print("DRY_RUN_BASELINES:")
+        print(json.dumps(baselines, indent=2, sort_keys=True))
         print("DRY_RUN complete. No files were written.")
         return
     if not available:
@@ -506,11 +812,21 @@ def main() -> None:
     if not examples:
         raise SystemExit("No train sequence examples were built from train CSV.")
 
-    model, train_summary = train_model(examples, valid_rows, row_index, args)
+    model, train_summary = train_model(examples, valid_rows, row_index, item_order, args)
     try:
         import torch  # type: ignore
     except Exception as exc:  # pragma: no cover
         raise SystemExit(f"PyTorch disappeared after preflight: {exc}")
+
+    final_valid = evaluate_model(
+        model,
+        valid_rows,
+        row_index,
+        item_order,
+        args,
+        debug_limit=args.debug_valid_samples,
+    )
+    assert_valid_evaluation_complete(final_valid, "final_valid")
 
     checkpoint_dir = args.output_dir / "checkpoint"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -520,8 +836,9 @@ def main() -> None:
     export_matrix, cold_report = prepare_export_matrix(raw_matrix, item_order, counts, args.normalization)
     metrics = {
         "checkpoint_metric": args.checkpoint_metric,
+        "baselines": baselines,
         "train_summary": train_summary,
-        "final_valid": evaluate_model(model, valid_rows, row_index, args),
+        "final_valid": final_valid,
     }
     paths = write_artifacts(
         args.output_dir,

@@ -73,7 +73,13 @@ TRAIN_CSV="${TRAIN_CSV:-data/Amazon/train/${CATEGORY}_5_2016-10-2018-11.csv}"
 VALID_CSV="${VALID_CSV:-data/Amazon/valid/${CATEGORY}_5_2016-10-2018-11.csv}"
 ITEM_ORDER="${ITEM_ORDER:-data/Amazon/cs_embeddings/${CATEGORY}/${CATEGORY}.item_order.json}"
 ROW_INDEX="${ROW_INDEX:-data/Amazon/cs_embeddings/${CATEGORY}/${CATEGORY}.row_index.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-data/Amazon/behavior_embeddings/sasrec/${CATEGORY}/${CONFIG_MODE}_train_only_seed${SEED}}"
+if [[ -z "${OUTPUT_DIR:-}" ]]; then
+  if [[ "$CONFIG_MODE" == "formal" ]]; then
+    OUTPUT_DIR="data/Amazon/behavior_embeddings/sasrec/${CATEGORY}/formal_v3_finite_maskfix_seed${SEED}"
+  else
+    OUTPUT_DIR="data/Amazon/behavior_embeddings/sasrec/${CATEGORY}/${CONFIG_MODE}_train_only_seed${SEED}"
+  fi
+fi
 
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
