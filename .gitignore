@@ -4,6 +4,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
 
 # Environments
 .env
@@ -28,12 +32,41 @@ checkpoints/
 checkpoint/
 saved_models/
 
+# Local experiment evidence archives
+# Keep small path/hash indexes versioned; retain bundles and extracted outputs locally.
+archive/**
+!archive/autodl_legacy_outputs/
+archive/autodl_legacy_outputs/**
+!archive/autodl_legacy_outputs/ARCHIVED_PATHS.txt
+!archive/autodl_legacy_outputs/REMOTE_SHA256SUMS.txt
+
+incoming/**
+!incoming/**/
+!incoming/**/*.sha256
+
+# Generated candidates / predictions / transfer bundles
+*.jsonl
+predictions*.json
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
 # Model weights
 *.pt
 *.pth
 *.bin
 *.safetensors
 *.ckpt
+
+# Temporary snapshots and transfer metadata
+build_sasrec_embeddings_numbered.txt
+sasrec_key_lines.txt
+*:Zone.Identifier
+*.tmp
+*.temp
+*.swp
+*~
 
 # IDE / system
 .vscode/

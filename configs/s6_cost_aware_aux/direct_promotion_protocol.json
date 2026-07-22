@@ -1,0 +1,63 @@
+{
+  "schema": "s6_direct_promotion_protocol.v1",
+  "category": "Industrial_and_Scientific",
+  "run_id": "promotion_v1",
+  "validation_only": true,
+  "test_read": false,
+  "candidate_budget_k": 20,
+  "train_split": "valid_fit",
+  "selection_split": "valid_select",
+  "gate_split": "valid_gate",
+  "model_family": "pairwise_logistic_direct_promotion_classifier",
+  "ranking_semantics": "cf_anchored_tail_replacement",
+  "anchor": "frozen CF-only candidate order",
+  "direct_candidate_scope": "from_sasrec_direct=true and from_cf=false",
+  "boundary_scope": "CF top-20 tail candidates",
+  "boundary_positions_0_based": [
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "max_promotions": [
+    1,
+    2,
+    3
+  ],
+  "threshold_count": 4,
+  "threshold_source": "valid_fit_pair_score_quantiles_only",
+  "threshold_quantiles": [
+    0.25,
+    0.5,
+    0.75,
+    0.9
+  ],
+  "selection_policy": [
+    "CF top-20 preservation >= 97% on valid_fit and valid_select",
+    "HR@20 uplift retention versus S6-5 frozen projected ranker >= 95%",
+    "NDCG@20 uplift retention versus S6-5 frozen projected ranker >= 95%",
+    "direct recovery count >= 90% of S6-5 frozen projected direct recovery",
+    "invalid candidate count = 0",
+    "deterministic feature and ranking hashes",
+    "maximize minimum HR/NDCG uplift retention across fit/select",
+    "then maximize minimum direct-recovery retention",
+    "then prefer fewer average promotions",
+    "then prefer smaller max_promotions"
+  ],
+  "forbidden_features": [
+    "target_item_id",
+    "is_target",
+    "candidate_correctness_at_inference",
+    "target_derived_rank",
+    "post_ranking_outcome",
+    "valid_select_label_during_fit",
+    "valid_gate_label_during_fit",
+    "test_derived_statistic"
+  ]
+}

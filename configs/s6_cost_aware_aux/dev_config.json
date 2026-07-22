@@ -1,0 +1,45 @@
+{
+  "schema": "s6_cost_aware_aux_dev_config.v1",
+  "category": "Industrial_and_Scientific",
+  "status": "checkpoint_compatible_validation_only_pipeline_ready_for_smoke",
+  "validation_only": true,
+  "test_read": false,
+  "seed": 42,
+  "source_valid_csv": "data/Amazon/valid/Industrial_and_Scientific_5_2016-10-2018-11.csv",
+  "validation_split_manifest": "results/s6_cost_aware_aux/Industrial_and_Scientific/s6_validation_split_manifest.json",
+  "checkpoint_compatibility_report": "results/s6_cost_aware_aux/Industrial_and_Scientific/s6_checkpoint_compatibility_report.json",
+  "sasrec_formal_v3": {
+    "artifact_manifest": "data/Amazon/behavior_embeddings/sasrec/Industrial_and_Scientific/formal_v3_finite_maskfix_seed42/artifact_manifest.json",
+    "config": "data/Amazon/behavior_embeddings/sasrec/Industrial_and_Scientific/formal_v3_finite_maskfix_seed42/config.json",
+    "declared_checkpoint": "data/Amazon/behavior_embeddings/sasrec/Industrial_and_Scientific/formal_v3_finite_maskfix_seed42/checkpoint/best_model.pt",
+    "exported_item_embedding": "data/Amazon/behavior_embeddings/sasrec/Industrial_and_Scientific/formal_v3_finite_maskfix_seed42/Industrial_and_Scientific.sasrec_item_emb.npy",
+    "checkpoint_required_for_direct_retrieval": true,
+    "exported_item_embedding_alone_is_sufficient": false
+  },
+  "direct_sasrec_candidate_budgets": [20, 50, 100],
+  "policies": {
+    "E0": "CF-only baseline from existing validation artifacts",
+    "E1": "Frozen S5 dual-Qwen validation upper bound, reused from existing artifacts only",
+    "E2": "CF + direct SASRec rank-only RRF",
+    "E3": "CF + direct SASRec with frozen projected ranker only if schema compatibility is confirmed"
+  },
+  "acceptance_gates": {
+    "candidate_recall": "retain at least 90% of auxiliary target-in-pool uplift of dual-Qwen valid upper bound",
+    "ranking_hr20": "retain at least 80% of dual-Qwen HR@20 uplift",
+    "ranking_ndcg20": "retain at least 80% of dual-Qwen NDCG@20 uplift",
+    "cost": "direct SASRec candidate generation time <= 20% of SASRec-SID Qwen generation time; preferred <= 10%",
+    "safety": {
+      "invalid_candidate_item_count": 0,
+      "row_alignment": "100%",
+      "deterministic_rerun_hashes_match": true,
+      "cf_top20_hit_preservation_minimum": "97%"
+    }
+  },
+  "allowed_verdicts": [
+    "GO_DIRECT_SASREC",
+    "GO_DIRECT_SASREC_WITH_NEW_RANKER",
+    "REVISE_DIRECT_SASREC",
+    "KEEP_DUAL_QWEN_UPPER_BOUND_ONLY",
+    "BLOCKED_MISSING_FULL_SASREC_CHECKPOINT"
+  ]
+}

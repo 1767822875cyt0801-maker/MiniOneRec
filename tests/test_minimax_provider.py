@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 # Mock heavy dependencies that may not be installed in test environment
 _mock_modules = {}
 for mod_name in [
-    'torch', 'transformers', 'gensim', 'accelerate', 'accelerate.utils',
+    'torch', 'transformers', 'gensim', 'accelerate', 'accelerate.utils', 'openai', 'aiohttp',
 ]:
     if mod_name not in sys.modules:
         _mock_modules[mod_name] = sys.modules[mod_name] = MagicMock()

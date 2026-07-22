@@ -20,6 +20,10 @@ Environment overrides:
   NUM_BEAMS      Default: 20
   MAX_CANDIDATES Default: 500
   SOURCE_WEIGHT  Default: 4.0
+  EVAL_SPLIT     valid or test. Default: test
+  CANDIDATE_MODES Default: "exact p3"
+  RESULT_ROOT    Default: results/stage7_validation_protocol/${EVAL_SPLIT}/${CATEGORY}
+  MANIFEST       Default: data/Amazon/sid_maps/experiment_manifest.json
   PYTHON         Default: python
 
 Run:
@@ -39,13 +43,22 @@ fi
 CATEGORY="${CATEGORY:-Industrial_and_Scientific}"
 TEXT_VERSION="${TEXT_VERSION:-text_mbk_k512_dedup}"
 CS_VERSION="${CS_VERSION:-cs_alpha0.2_k512_dedup}"
+MANIFEST="${MANIFEST:-data/Amazon/sid_maps/experiment_manifest.json}"
+EVAL_SPLIT="${EVAL_SPLIT:-test}"
 SAMPLE_SIZE="${SAMPLE_SIZE:-30000}"
 NUM_EPOCHS="${NUM_EPOCHS:-1}"
 RUN_LABEL="${RUN_LABEL:-noearly}"
 NUM_BEAMS="${NUM_BEAMS:-20}"
 MAX_CANDIDATES="${MAX_CANDIDATES:-500}"
 SOURCE_WEIGHT="${SOURCE_WEIGHT:-4.0}"
+CANDIDATE_MODES="${CANDIDATE_MODES:-exact p3}"
+RESULT_ROOT="${RESULT_ROOT:-results/stage7_validation_protocol/${EVAL_SPLIT}/${CATEGORY}}"
 PYTHON="${PYTHON:-python}"
+
+if [[ "$EVAL_SPLIT" != "valid" && "$EVAL_SPLIT" != "test" ]]; then
+  echo "EVAL_SPLIT must be valid or test, got: $EVAL_SPLIT" >&2
+  exit 2
+fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
@@ -64,7 +77,25 @@ row_index_path="data/Amazon/cs_embeddings/${CATEGORY}/${CATEGORY}.row_index.json
 
 prediction_path() {
   local version="$1"
-  echo "results/eval_sidonly_${CATEGORY}_${version}_sample${SAMPLE_SIZE}_ep${NUM_EPOCHS}${suffix}_beam${NUM_BEAMS}/predictions.json"
+  echo "${RESULT_ROOT}/${version}/predictions/predictions.json"
+}
+
+manifest_path_or_fallback() {
+  local version="$1"
+  local key="$2"
+  local fallback="$3"
+  "$PYTHON" - "$MANIFEST" "$version" "$CATEGORY" "$key" "$fallback" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path, version, category, key, fallback = sys.argv[1:6]
+entry = {}
+if Path(manifest_path).exists():
+    manifest = json.load(open(manifest_path, "r", encoding="utf-8"))
+    entry = manifest.get("sid_versions", {}).get(version, {}).get(category, {})
+print(entry.get(key) or fallback)
+PY
 }
 
 embedding_path() {
@@ -119,26 +150,37 @@ run_one() {
   local emb
   emb="$(embedding_path "$version")"
   local version_dir="data/Amazon/sid_versions/${version}/${CATEGORY}"
-  local cand_dir="results/candidates_${CATEGORY}_${name}_30k_${mode}_c${MAX_CANDIDATES}_v2"
-  local rerank_dir="results/rerank_${CATEGORY}_${name}_30k_${mode}_c${MAX_CANDIDATES}_sourcew${SOURCE_WEIGHT}_v2"
+  local eval_csv
+  eval_csv="$(manifest_path_or_fallback "$version" "${EVAL_SPLIT}_csv" "${version_dir}/${EVAL_SPLIT}.csv")"
+  local train_csv
+  train_csv="$(manifest_path_or_fallback "$version" "train_csv" "${version_dir}/train.csv")"
+  local item2sid
+  item2sid="$(manifest_path_or_fallback "$version" "item2sid" "${version_dir}/item2sid.json")"
+  local sid2items
+  sid2items="$(manifest_path_or_fallback "$version" "sid2items" "${version_dir}/sid2items.json")"
+  local valid_sid_set
+  valid_sid_set="$(manifest_path_or_fallback "$version" "valid_sid_set" "${version_dir}/valid_sid_set.json")"
+  local cand_dir="${RESULT_ROOT}/${version}/${mode}/candidates"
+  local rerank_dir="${RESULT_ROOT}/${version}/${mode}/rerank"
 
   check_required "$pred"
   check_required "$emb"
   check_required "$row_index_path"
-  check_required "${version_dir}/test.csv"
-  check_required "${version_dir}/train.csv"
-  check_required "${version_dir}/item2sid.json"
-  check_required "${version_dir}/sid2items.json"
-  check_required "${version_dir}/valid_sid_set.json"
+  check_required "$eval_csv"
+  check_required "$train_csv"
+  check_required "$item2sid"
+  check_required "$sid2items"
+  check_required "$valid_sid_set"
 
   echo
   echo "===== ${CATEGORY} / ${version} / ${mode} ====="
   "$PYTHON" evaluate_candidates.py \
     --prediction-file "$pred" \
-    --test-csv "${version_dir}/test.csv" \
-    --item2sid "${version_dir}/item2sid.json" \
-    --sid2items "${version_dir}/sid2items.json" \
-    --valid-sid-set "${version_dir}/valid_sid_set.json" \
+    --eval-csv "$eval_csv" \
+    --eval-split "$EVAL_SPLIT" \
+    --item2sid "$item2sid" \
+    --sid2items "$sid2items" \
+    --valid-sid-set "$valid_sid_set" \
     "${prefix_args[@]}" \
     --max-pred-sids "$NUM_BEAMS" \
     --max-candidates "$MAX_CANDIDATES" \
@@ -148,7 +190,8 @@ run_one() {
 
   "$PYTHON" rerank.py \
     --candidate-jsonl "${cand_dir}/candidates.jsonl" \
-    --train-csv "${version_dir}/train.csv" \
+    --train-csv "$train_csv" \
+    --eval-split "$EVAL_SPLIT" \
     --item-emb "$emb" \
     --row-index "$row_index_path" \
     --source-weight "$SOURCE_WEIGHT" \
@@ -163,27 +206,32 @@ echo "Stage 6 candidate/rerank"
 echo "  CATEGORY=${CATEGORY}"
 echo "  TEXT_VERSION=${TEXT_VERSION}"
 echo "  CS_VERSION=${CS_VERSION}"
+echo "  EVAL_SPLIT=${EVAL_SPLIT}"
+echo "  RESULT_ROOT=${RESULT_ROOT}"
 echo "  SAMPLE_SIZE=${SAMPLE_SIZE}"
 echo "  NUM_EPOCHS=${NUM_EPOCHS}"
 echo "  RUN_LABEL=${RUN_LABEL}"
 echo "  NUM_BEAMS=${NUM_BEAMS}"
 echo "  MAX_CANDIDATES=${MAX_CANDIDATES}"
 echo "  SOURCE_WEIGHT=${SOURCE_WEIGHT}"
+echo "  CANDIDATE_MODES=${CANDIDATE_MODES}"
 
-run_one "$TEXT_VERSION" "$text_name" exact
-run_one "$CS_VERSION" "$cs_name" exact
-run_one "$TEXT_VERSION" "$text_name" p3
-run_one "$CS_VERSION" "$cs_name" p3
+for mode in $CANDIDATE_MODES; do
+  run_one "$TEXT_VERSION" "$text_name" "$mode"
+  run_one "$CS_VERSION" "$cs_name" "$mode"
+done
 
-summary_path="results/stage6_${CATEGORY}_candidate_rerank_summary.csv"
-"$PYTHON" - "$CATEGORY" "$text_name" "$cs_name" "$MAX_CANDIDATES" "$SOURCE_WEIGHT" "$summary_path" <<'PY'
+summary_path="${RESULT_ROOT}/stage6_candidate_rerank_summary.csv"
+"$PYTHON" - "$RESULT_ROOT" "$TEXT_VERSION" "$CS_VERSION" "$EVAL_SPLIT" "$CANDIDATE_MODES" "$summary_path" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-category, text_name, cs_name, max_candidates, source_weight, summary_path = sys.argv[1:]
+result_root, text_version, cs_version, eval_split, candidate_modes, summary_path = sys.argv[1:]
+result_root = Path(result_root)
+candidate_modes = candidate_modes.split()
 
 rows = []
 
@@ -191,13 +239,13 @@ def load(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def add(name, setting):
-    cand = load(f"results/candidates_{category}_{name}_30k_{setting}_c{max_candidates}_v2/report.json")
-    rerank = load(
-        f"results/rerank_{category}_{name}_30k_{setting}_c{max_candidates}_sourcew{source_weight}_v2/rerank_report.json"
-    )
+def add(version, setting):
+    base = result_root / version / setting
+    cand = load(base / "candidates" / "report.json")
+    rerank = load(base / "rerank" / "rerank_report.json")
     rows.append({
-        "version": name,
+        "eval_split": eval_split,
+        "version": version,
         "setting": setting,
         "mean_candidates": cand["candidate_count"]["mean"],
         "candidate_pool_recall": cand["candidate_pool_recall"]["target_in_pool_rate"],
@@ -210,9 +258,9 @@ def add(name, setting):
         "after_ndcg20": rerank["after_rerank"]["ndcg@20"],
     })
 
-for version_name in [text_name, cs_name]:
-    add(version_name, "exact")
-    add(version_name, "p3")
+for version_name in [text_version, cs_version]:
+    for mode in candidate_modes:
+        add(version_name, mode)
 
 df = pd.DataFrame(rows)
 Path(summary_path).parent.mkdir(parents=True, exist_ok=True)

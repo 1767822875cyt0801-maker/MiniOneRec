@@ -53,6 +53,9 @@ class ConstrainedLogitsProcessor(LogitsProcessor):
                 else:
                     hash_key=sent[-self.count:]
                 hash_key = hash_key.tolist()
+                if self.eos_token_id is not None and self.eos_token_id in hash_key:
+                    mask[batch_id * self._num_beams + beam_id, self.eos_token_id] = 0
+                    continue
                 prefix_allowed_tokens = self._prefix_allowed_tokens_fn(batch_id, hash_key)
 
                 if len(prefix_allowed_tokens) == 0:

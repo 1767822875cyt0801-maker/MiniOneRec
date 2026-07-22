@@ -1,0 +1,52 @@
+{
+  "schema": "s6_lightweight_ranker_protocol.v1",
+  "category": "Industrial_and_Scientific",
+  "run_id": "lightweight_v1",
+  "validation_only": true,
+  "test_read": false,
+  "candidate_budget_k": 20,
+  "train_split": "valid_fit",
+  "selection_split": "valid_select",
+  "gate_split": "valid_gate",
+  "model_family": "linear_pairwise_logistic_residual",
+  "final_score": "frozen_ranker_score + alpha * clipped_residual_score",
+  "preservation_mechanism": "deterministic_cf_head_quota",
+  "config_grid": {
+    "alpha": [
+      0.1,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "l2": [
+      0.001,
+      0.01
+    ],
+    "residual_clip": [
+      0.25,
+      0.5
+    ],
+    "cf_head_quota": [
+      0,
+      10,
+      15,
+      18
+    ]
+  },
+  "selection_policy": [
+    "CF top-20 preservation >= 97% on valid_fit and valid_select",
+    "HR@20 uplift retention versus S6-5 frozen projected ranker >= 95%",
+    "NDCG@20 uplift retention versus S6-5 frozen projected ranker >= 95%",
+    "direct recovery count >= 90% of S6-5 frozen projected direct recovery",
+    "maximize min(HR@20 retention, NDCG@20 retention)",
+    "prefer smaller model and smaller alpha on ties"
+  ],
+  "forbidden_features": [
+    "target_item_id",
+    "is_target",
+    "post_ranking_outcome",
+    "valid_select_label_during_fit",
+    "valid_gate_label_during_fit",
+    "test_derived_statistic"
+  ]
+}
