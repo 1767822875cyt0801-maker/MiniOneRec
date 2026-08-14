@@ -1,0 +1,71 @@
+experiment:
+  name: course-smoke-cf-sasrec-exact
+  seed: 42
+  dataset: Industrial_and_Scientific
+  split: smoke
+  output_root: /tmp/minionerec_course_system_smoke
+  overwrite: false
+
+execution:
+  formal: false
+  fixture_kind: synthetic_not_from_test
+
+inputs:
+  mode: frozen_predictions
+  streams: [cf_sid, sasrec_sid]
+  cf_prediction: tests/course_system/fixtures/cf_predictions.json
+  sasrec_prediction: tests/course_system/fixtures/sasrec_predictions.json
+  cf_sid_mapping: tests/course_system/fixtures/cf_sid2items.json
+  sasrec_sid_mapping: tests/course_system/fixtures/sasrec_sid2items.json
+  valid_data: tests/course_system/fixtures/synthetic_valid.csv
+  valid_split_manifest: tests/course_system/fixtures/synthetic_split_manifest.ndjson
+
+candidate:
+  mode: exact
+  stable_dedup: true
+  max_pred_sids: 50
+  max_candidates_per_stream: 1000
+
+fusion:
+  method: source_aware_rrf
+  lambda_sasrec: 0.75
+  source_bonus: 0.01
+
+budget:
+  values: [20, 50, 75, 90, all]
+  position: post_fusion_pre_rerank
+  top_n: 20
+  fail_if_inactive: true
+  warn_affected_fraction_below: 0.10
+
+rerank:
+  method: p2_frozen_history_aware
+  compatibility_mode: source_independent_projection
+  frozen_config: configs/s5_auxiliary_fusion/frozen_release_config.json
+  frozen_model: results/stage7_validation_protocol/valid/Industrial_and_Scientific/p2_history_ranker/model.json
+  train_data: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/train.csv
+  item_embedding: data/Amazon/cs_embeddings/Industrial_and_Scientific/Industrial_and_Scientific.cf_emb.npy
+  row_index: data/Amazon/cs_embeddings/Industrial_and_Scientific/Industrial_and_Scientific.row_index.json
+  top_n: 20
+
+evaluation:
+  quality_split: valid_select
+  metrics: [candidate_recall, hr@10, hr@20, ndcg@10, ndcg@20]
+
+profiling:
+  scope: frozen_prediction_downstream
+  enabled: true
+  warmup_samples: 1
+  repeats: 1
+  synchronize_cuda_if_used: true
+  record_per_sample: true
+  record_cpu_rss: true
+  record_cuda_memory_if_used: true
+
+artifacts:
+  save_resolved_config: true
+  save_command_plan: true
+  save_manifest: true
+  save_cardinality_report: true
+  save_per_sample_quality: true
+  save_per_sample_latency: true

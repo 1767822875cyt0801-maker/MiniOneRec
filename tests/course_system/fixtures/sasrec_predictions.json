@@ -1,0 +1,6 @@
+[
+  {"input": "synthetic smoke 0", "output": "<a_1><b_1><c_1>", "predict": ["<a_1><b_1><c_1>"]},
+  {"input": "synthetic smoke 1", "output": "<a_1><b_1><c_1>", "predict": ["<a_1><b_1><c_1>"]},
+  {"input": "synthetic smoke 2", "output": "<a_1><b_1><c_1>", "predict": ["<a_1><b_1><c_1>"]},
+  {"input": "synthetic smoke 3", "output": "<a_1><b_1><c_1>", "predict": ["<a_1><b_1><c_1>"]}
+]

@@ -1,0 +1,118 @@
+experiment:
+  name: course-valid-select-cf-sasrec-exact
+  seed: 42
+  dataset: Industrial_and_Scientific
+  split: valid
+  output_root: results/course_system
+  overwrite: false
+
+execution:
+  formal: true
+  fixture_kind: none
+
+inputs:
+  mode: frozen_predictions
+  streams: [cf_sid, sasrec_sid]
+  cf_prediction: incoming/s4_formal_full_valid/s4_formal_full_valid_closeout_20260714_181036/results/s4_sasrec_sid_valid/Industrial_and_Scientific/cf_k512_dedup/seed42/formal/valid/full_valid/generation/predictions.json
+  sasrec_prediction: incoming/s4_formal_full_valid/s4_formal_full_valid_closeout_20260714_181036/results/s4_sasrec_sid_valid/Industrial_and_Scientific/sasrec_v3_k512_dedup/seed42/formal/valid/full_valid/generation/predictions.json
+  cf_sid_mapping: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/sid2items.json
+  sasrec_sid_mapping: data/Amazon/sid_versions/sasrec_v3_k512_dedup/Industrial_and_Scientific/sid2items.json
+  valid_data: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/valid.csv
+  valid_split_manifest: results/stage7_validation_protocol/valid/Industrial_and_Scientific/p2_history_ranker/history_reranked_candidates.jsonl
+  valid_split_evidence: existing_p2_split_reused_by_s5_load_split_map
+
+candidate:
+  mode: exact
+  stable_dedup: true
+  max_pred_sids: 50
+  max_candidates_per_stream: 1000
+
+fusion:
+  method: source_aware_rrf
+  lambda_sasrec: 0.75
+  source_bonus: 0.01
+
+budget:
+  values: [20, 50, 75, 90, all]
+  position: post_fusion_pre_rerank
+  top_n: 20
+  fail_if_inactive: true
+  warn_affected_fraction_below: 0.10
+
+rerank:
+  method: p2_frozen_history_aware
+  compatibility_mode: source_independent_projection
+  frozen_config: configs/s5_auxiliary_fusion/frozen_release_config.json
+  frozen_model: results/stage7_validation_protocol/valid/Industrial_and_Scientific/p2_history_ranker/model.json
+  train_data: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/train.csv
+  item_embedding: data/Amazon/cs_embeddings/Industrial_and_Scientific/Industrial_and_Scientific.cf_emb.npy
+  row_index: data/Amazon/cs_embeddings/Industrial_and_Scientific/Industrial_and_Scientific.row_index.json
+  top_n: 20
+
+evaluation:
+  quality_split: valid_select
+  metrics: [candidate_recall, hr@10, hr@20, ndcg@10, ndcg@20]
+
+profiling:
+  scope: frozen_prediction_downstream
+  enabled: true
+  warmup_samples: 20
+  repeats: 3
+  synchronize_cuda_if_used: true
+  record_per_sample: true
+  record_cpu_rss: true
+  record_cuda_memory_if_used: true
+
+artifacts:
+  save_resolved_config: true
+  save_command_plan: true
+  save_manifest: true
+  save_cardinality_report: true
+  save_per_sample_quality: true
+  save_per_sample_latency: true
+
+formal_guard:
+  required_branch: course-system-bounded-rerank-v1
+  required_python_major_minor: "3.11"
+  expected_sample_count: 1360
+  expected_quality_split: valid_select
+  expected_budget_grid: [20, 50, 75, 90, all]
+  tracked_worktree_must_be_clean: true
+  index_must_be_clean: true
+  course_paths:
+    - minionerec_system
+    - configs/course_system
+    - scripts/run_course_system.py
+    - scripts/check_course_system_artifacts.py
+    - tests/course_system
+    - docs/优化五/course_system_skeleton_implementation_report.md
+    - docs/优化五/course_system_cardinality_closeout_v1.md
+  immutable_files:
+    cf_prediction:
+      path: incoming/s4_formal_full_valid/s4_formal_full_valid_closeout_20260714_181036/results/s4_sasrec_sid_valid/Industrial_and_Scientific/cf_k512_dedup/seed42/formal/valid/full_valid/generation/predictions.json
+      size_bytes: 10295761
+      sha256: 40f9bd734da5e555cb3c5788bc3b462b08fa2413b61fdc82a57052afa334a903
+    sasrec_prediction:
+      path: incoming/s4_formal_full_valid/s4_formal_full_valid_closeout_20260714_181036/results/s4_sasrec_sid_valid/Industrial_and_Scientific/sasrec_v3_k512_dedup/seed42/formal/valid/full_valid/generation/predictions.json
+      size_bytes: 9785754
+      sha256: 1db9fbefa70a8b6064544c10bbdacf4aa102757036500410af3cbb6274493210
+    cf_sid_mapping:
+      path: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/sid2items.json
+      size_bytes: 167919
+      sha256: 7f4da9544bb8da8b7df38c19fe7e201f7186c308c28bf9db40ef4bac7dbeaa79
+    sasrec_sid_mapping:
+      path: data/Amazon/sid_versions/sasrec_v3_k512_dedup/Industrial_and_Scientific/sid2items.json
+      size_bytes: 162696
+      sha256: 81ca537d6a838d762d0647066d617c1540c0b5fbf67cc7f361c152d3db8fa392
+    valid_data:
+      path: data/Amazon/sid_versions/cf_k512_dedup/Industrial_and_Scientific/valid.csv
+      size_bytes: 3578448
+      sha256: 5234a104809d20585aa9ba91dfdf98d348d9fe6429a131a737a89d77c5780e9e
+    frozen_config:
+      path: configs/s5_auxiliary_fusion/frozen_release_config.json
+      size_bytes: 8566
+      sha256: fe53b9ae6b5d12d98a3ccd6f0a6526e3a00bed680f595f72c5521f0e928a6e6a
+    frozen_model:
+      path: results/stage7_validation_protocol/valid/Industrial_and_Scientific/p2_history_ranker/model.json
+      size_bytes: 4579
+      sha256: 6a3bca7cc714d295572ce4a3953d60719a1c72757895835554a83d747dca65ce
