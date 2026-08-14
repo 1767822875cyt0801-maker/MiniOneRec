@@ -87,6 +87,144 @@ class CoursePipeline:
             result.update({"input_meta": input_meta, "sample_cardinality": audit.summary})
         return result
 
+    def formal_preflight(self, expected_course_commit: str, run_id: str) -> dict[str, Any]:
+        """Validate a future formal run without creating an output directory or running the pipeline."""
+
+        if not self.config.is_formal:
+            raise ConfigError("formal preflight requires a formal config")
+        if Path(run_id).name != run_id or run_id in {".", ".."}:
+            raise ConfigError("formal preflight run_id must be a single safe path component")
+        guard = verify_formal_execution_guard(self.config, expected_course_commit)
+        inspection = adapters.inspect_input_files(self.config)
+        split_path = Path(self.config.data["inputs"]["valid_split_manifest"])
+        split_counts: dict[str, int] = {}
+        split_ids: set[str] = set()
+        duplicate_ids: set[str] = set()
+        with split_path.open("r", encoding="utf-8") as handle:
+            for fallback, line in enumerate(handle):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                split = str(row.get("p2_split", ""))
+                if split not in {"valid_fit", "valid_select"}:
+                    raise ConfigError(f"formal split assignment contains invalid p2_split={split!r}")
+                sample_id = str(row.get("row_index", row.get("sample_id", fallback)))
+                if sample_id in split_ids:
+                    duplicate_ids.add(sample_id)
+                split_ids.add(sample_id)
+                split_counts[split] = split_counts.get(split, 0) + 1
+        if duplicate_ids:
+            raise ConfigError(f"formal split assignment contains duplicate sample IDs: {sorted(duplicate_ids)[:10]}")
+        expected_select = int(guard["expected_sample_count"])
+        if split_counts.get("valid_select", 0) != expected_select:
+            raise ConfigError(
+                "formal split assignment valid_select count drifted: "
+                f"actual={split_counts.get('valid_select', 0)} expected={expected_select}"
+            )
+        experiment = self.config.data["experiment"]
+        run_dir = self.config.output_root / experiment["split"] / experiment["dataset"] / run_id
+        if run_dir.exists():
+            raise ConfigError(f"formal output run id already exists: {run_dir}")
+        files = inspection["files"]
+        checks = [
+            {
+                "name": "exact HEAD",
+                "status": "PASS",
+                "expected": expected_course_commit,
+                "actual": guard["git"]["head"],
+            },
+            {
+                "name": "tracked worktree",
+                "status": "PASS",
+                "expected": "clean",
+                "actual": "clean",
+            },
+            {"name": "index", "status": "PASS", "expected": "clean", "actual": "clean"},
+            {
+                "name": "protected course paths tracked by HEAD",
+                "status": "PASS",
+                "expected": "all tracked by HEAD",
+                "actual": (
+                    "all tracked by HEAD"
+                    if guard["git"]["course_paths_tracked_by_head"]
+                    else "missing protected paths"
+                ),
+            },
+            {
+                "name": "protected course paths untracked count",
+                "status": "PASS",
+                "expected": 0,
+                "actual": guard["git"]["course_untracked_count"],
+            },
+            {
+                "name": "Python major.minor",
+                "status": "PASS",
+                "expected": self.config.data["formal_guard"]["required_python_major_minor"],
+                "actual": guard["python_major_minor"],
+            },
+            {
+                "name": "config plan-only contract",
+                "status": "PASS",
+                "expected": {
+                    "formal": True,
+                    "split": "valid",
+                    "quality_split": "valid_select",
+                    "candidate_mode": "exact",
+                    "budgets": [20, 50, 75, 90, "all"],
+                },
+                "actual": {
+                    "formal": self.config.is_formal,
+                    "split": self.config.data["experiment"]["split"],
+                    "quality_split": self.config.data["evaluation"]["quality_split"],
+                    "candidate_mode": self.config.data["candidate"]["mode"],
+                    "budgets": self.config.budgets,
+                },
+            },
+            {
+                "name": "required input paths",
+                "status": "PASS",
+                "expected": "all files exist",
+                "actual": sorted(name for name, item in files.items() if item["exists"]),
+            },
+            {
+                "name": "prediction files",
+                "status": "PASS",
+                "expected": ["inputs.cf_prediction", "inputs.sasrec_prediction"],
+                "actual": [
+                    name
+                    for name in ["inputs.cf_prediction", "inputs.sasrec_prediction"]
+                    if files[name]["exists"]
+                ],
+            },
+            {
+                "name": "split assignment",
+                "status": "PASS",
+                "expected": {"valid_select": expected_select},
+                "actual": split_counts,
+            },
+            {
+                "name": "frozen ranker",
+                "status": "PASS",
+                "expected": "history_aware_linear_pairwise_logistic",
+                "actual": inspection["ranker_model_type"],
+            },
+            {
+                "name": "output run id",
+                "status": "PASS",
+                "expected": "absent",
+                "actual": {"path": str(run_dir), "exists": False},
+            },
+        ]
+        return {
+            "schema": "course_formal_preflight.v1",
+            "status": "PASS",
+            "formal_experiment_run": False,
+            "run_id": run_id,
+            "checks": checks,
+            "guard": guard,
+            "input_inspection": inspection,
+        }
+
     def _prepare_pre_budget(
         self,
         bundle: InputBundle,
@@ -195,10 +333,17 @@ class CoursePipeline:
         run_id: str | None,
         max_samples: int | None,
         command: str,
+        expected_course_commit: str | None = None,
     ) -> Path:
         if run_mode not in {"cardinality_audit", "full_pipeline"}:
             raise ValueError(run_mode)
-        formal_guard = verify_formal_execution_guard(self.config) if self.config.is_formal else None
+        if self.config.is_formal and expected_course_commit is None:
+            raise ConfigError("formal execution requires --expected-course-commit")
+        formal_guard = (
+            verify_formal_execution_guard(self.config, expected_course_commit)
+            if self.config.is_formal and expected_course_commit is not None
+            else None
+        )
         plan = build_command_plan(self.config, run_mode)
         run = ArtifactRun(self.config, run_id, run_mode, command, plan, formal_guard=formal_guard)
         profiler = StageProfiler(bool(self.config.data["profiling"]["synchronize_cuda_if_used"]))

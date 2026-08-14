@@ -18,7 +18,8 @@ WAITING_FOR_USER_MANUAL_RUN=YES
 | starting branch | `phase4-chrono-unirank` |
 | starting HEAD | `8c4aa08ed76dd7b93836502e474d7093073e42ff` |
 | course branch | `course-system-bounded-rerank-v1` |
-| commit subject | `Implement course system and freeze cardinality grid` |
+| frozen implementation commit | `ca98c381f39b1fc5a38e3093bc611eb64d4d1f92` |
+| handoff-fix commit subject | `Fix course AutoDL preflight and staged handoff` |
 | push | 未执行 |
 | unrelated Phase 4 untracked files | 保留，不删除、不移动、不暂存 |
 
@@ -62,6 +63,7 @@ Top-20 downstream output
 | `scripts/check_course_system_artifacts.py` | 只读 artifact checker 入口 |
 | `tests/course_system/` | K90、formal guard、路径可移植性、v1 分布与 checker 定向测试 |
 | `docs/优化五/course_system_cardinality_closeout_v1.md` | v1 只读复算、证据定性与 v2/K-matrix gate |
+| `docs/优化五/course_system_autodl_manual_runbook_v1.md` | WSL 传输、AutoDL 获取/preflight/v2 与未来 K matrix 的分阶段手册 |
 
 ## 5. Frozen formal contract
 
@@ -74,8 +76,9 @@ Top-20 downstream output
 - Top-N=20，budgets=`[20,50,75,90,all]`；
 - profiling scope=`frozen_prediction_downstream`，warmup=20，repeats=3；
 - Python major/minor=`3.11`；
-- formal execution 只允许课程分支、clean tracked worktree、clean index、课程路径全部由 HEAD 覆盖；
-- 无关 untracked 路径不导致误拒绝，但写入明确 warning；正式证据仍要求 clean checkout。
+- formal execution 要求调用方通过 `--expected-course-commit` 明确给出完整 commit，并验证当前 HEAD 精确相等；
+- formal execution 只允许课程分支、clean tracked worktree、clean index、课程路径全部由 HEAD 覆盖且课程路径内没有 untracked 文件；
+- `data/`、`incoming/`、`results/`、`outputs/`、`logs/` 和课程范围外 Phase 4 untracked 不导致误拒绝，只记录 count/path warning。
 
 CF/SASRec prediction、两份 SID mapping、valid CSV、frozen S5 config 与 P2 model 的仓库相对路径、大小和 SHA-256 均冻结。真实 formal run 在创建输出目录之前重新计算这些文件的 SHA-256；plan-only 不扫描它们。
 
@@ -83,7 +86,7 @@ CF/SASRec prediction、两份 SID mapping、valid CSV、frozen S5 config 与 P2 
 
 任何一项不满足即拒绝正式运行：
 
-1. 当前课程代码未被 HEAD 覆盖；
+1. 当前 HEAD 与调用方明确给出的课程 commit 不一致，或课程代码未被 HEAD 覆盖；
 2. tracked worktree 或 index 不干净；
 3. Python 不是 3.11；
 4. 不可变输入 path/size/SHA-256 漂移；
@@ -92,7 +95,7 @@ CF/SASRec prediction、两份 SID mapping、valid CSV、frozen S5 config 与 P2 
 7. 出现 test 输入或 unresolved placeholder；
 8. 运行时 cardinality gate 非 PASS。
 
-该保护在 `CoursePipeline.run()` 内执行，不能通过 CLI 参数绕过。plan-only 和 synthetic dry-run 不创建正式实验。
+该保护在 `CoursePipeline.run()` 内执行；formal execution 缺少 `--expected-course-commit` 会直接拒绝。`--formal-preflight` 只检查 HEAD、Git、Python、输入、split、ranker、plan 和输出 run-id，不创建正式实验。plan-only 和 synthetic dry-run 同样不创建正式实验。
 
 ## 7. Cardinality decision
 
@@ -113,7 +116,7 @@ python -m py_compile minionerec_system/*.py scripts/run_course_system.py scripts
 PASS
 
 pytest -q tests/course_system/
-27 passed
+39 passed
 
 smoke config plan-only
 PASS
@@ -131,7 +134,7 @@ PASS; post-dedup=95; K20/K50/K75/K90/all vectors distinct; gate=PASS
 COMPLETED; checker=PASS
 ```
 
-定向测试覆盖 K90 解析/effective count/vector、v1 candidate distribution、正式预算顺序、test 与参数漂移拒绝、未跟踪课程代码拒绝、repo-root 可移植性和 checker K90 识别。
+定向测试另覆盖无 untracked PASS、`results/`/`incoming/`/Phase 4 untracked PASS、课程目录 untracked FAIL、runner tracked diff FAIL、index FAIL、HEAD mismatch FAIL、checker guard provenance，以及 guard 不删除/移动/忽略文件。
 
 ## 9. Explicitly not run
 
@@ -139,8 +142,19 @@ COMPLETED; checker=PASS
 
 ## 10. Next gate
 
-用户在 AutoDL clean checkout、课程分支/提交、`minionerec-dev` Python 3.11 下手动运行 `course-valid-cardinality-v2`。只有 v2 exact-value verification 和 checker 全部 PASS，才可使用 frozen K-matrix 配置运行新的唯一 run id；任一不一致均为：
+WSL 传输准备环境为 `minionerec-dev`；AutoDL 执行环境为 `minionerec`。用户按照 `course_system_autodl_manual_runbook_v1.md` 的 Stage A/B/C/D 手动运行 `course-valid-cardinality-v2`。Stage D 完成后必须停止并回传 v2，不能自动进入 K matrix。未来 Stage E 只有在 Codex 审计 v2 且用户再次明确确认后才能开展；任一不一致均为：
 
 ```text
 DO_NOT_RUN_K_MATRIX
 ```
+
+## 11. AutoDL handoff repair
+
+上一版交付命令在交互 shell 中组合了全局 untracked 断言与 `set -e`，会被 59 个已知 Phase 4 untracked 触发并退出 shell；同时误用了 AutoDL 环境名 `minionerec-dev`，并把 v2 PASS 与 K matrix 串联。修复后：
+
+- WSL Stage A 与 AutoDL Stage B/C/D 完全分离；
+- AutoDL 环境固定为 `minionerec`，不存在即明确停止，不创建环境、不安装依赖；
+- Git guard 只把课程路径 untracked 视为错误，范围外 untracked 只记录 provenance；
+- expected course commit 由 Stage A 人工传递，并在 formal preflight/正式运行/checker 三处核对；
+- fail-fast 检查只在显式子 shell 中执行，每项输出 PASS/FAIL、expected、actual；
+- Stage D 只生成 cardinality v2 return bundle，然后停止等待人工审计；Stage E 本轮没有执行命令。

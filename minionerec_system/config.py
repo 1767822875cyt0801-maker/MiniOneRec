@@ -351,6 +351,7 @@ def verify_formal_git_state(
     project_root: Path,
     course_paths: list[str],
     required_branch: str | None,
+    expected_head: str | None = None,
 ) -> dict[str, Any]:
     """Require tracked/index cleanliness and HEAD coverage without rejecting unrelated untracked files."""
 
@@ -358,6 +359,11 @@ def verify_formal_git_state(
     branch = _git(root, "branch", "--show-current").stdout.strip()
     head = _git(root, "rev-parse", "HEAD").stdout.strip()
     errors: list[str] = []
+    if expected_head is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+            raise ConfigError("expected course commit must be a full lowercase 40-character Git commit")
+        if head != expected_head:
+            errors.append(f"current HEAD is {head!r}, expected course commit {expected_head!r}")
     if required_branch and branch != required_branch:
         errors.append(f"current branch is {branch!r}, expected {required_branch!r}")
     tracked = _git(root, "diff", "--quiet", check=False)
@@ -399,6 +405,7 @@ def verify_formal_git_state(
         "course_paths_tracked_by_head": True,
         "course_untracked_count": 0,
         "unrelated_untracked_count": len(unrelated_untracked),
+        "unrelated_untracked_paths": unrelated_untracked,
         "warnings": warnings,
     }
 
@@ -411,7 +418,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_formal_execution_guard(config: ResolvedConfig) -> dict[str, Any]:
+def verify_formal_execution_guard(config: ResolvedConfig, expected_course_commit: str) -> dict[str, Any]:
     """Run immediately before a real formal audit/matrix execution, never during plan-only."""
 
     if not config.is_formal:
@@ -426,6 +433,7 @@ def verify_formal_execution_guard(config: ResolvedConfig) -> dict[str, Any]:
         config.project_root,
         list(guard["course_paths"]),
         str(guard["required_branch"]),
+        expected_head=expected_course_commit,
     )
     immutable_report: dict[str, Any] = {}
     for label, (section, field) in FORMAL_IMMUTABLE_FIELDS.items():
@@ -450,8 +458,9 @@ def verify_formal_execution_guard(config: ResolvedConfig) -> dict[str, Any]:
             "sha256": digest,
         }
     return {
-        "schema": "course_formal_execution_guard.v1",
+        "schema": "course_formal_execution_guard.v2",
         "status": "PASS",
+        "expected_course_commit": expected_course_commit,
         "expected_sample_count": FROZEN_FORMAL_SAMPLE_COUNT,
         "expected_quality_split": "valid_select",
         "expected_budget_grid": list(FROZEN_FORMAL_BUDGETS),

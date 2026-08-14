@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from minionerec_system.config import ConfigError, PROJECT_ROOT, load_course_config, verify_formal_git_state
+from minionerec_system.pipeline import CoursePipeline
 
 
 BASE = PROJECT_ROOT / "configs/course_system/smoke_cf_sasrec_exact.yaml"
@@ -63,6 +64,17 @@ def test_formal_config_has_complete_frozen_budget_order() -> None:
     config = load_course_config(FORMAL, PROJECT_ROOT)
     assert config.budgets == [20, 50, 75, 90, "all"]
     assert config.data["evaluation"]["quality_split"] == "valid_select"
+
+
+def test_formal_execution_requires_explicit_expected_commit() -> None:
+    config = load_course_config(FORMAL, PROJECT_ROOT)
+    with pytest.raises(ConfigError, match="--expected-course-commit"):
+        CoursePipeline(config).run(
+            run_mode="cardinality_audit",
+            run_id="must-not-be-created",
+            max_samples=None,
+            command="synthetic command",
+        )
 
 
 def test_formal_config_rejects_test_even_with_test_guard(tmp_path: Path) -> None:

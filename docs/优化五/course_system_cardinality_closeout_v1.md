@@ -131,7 +131,7 @@ head=8c4aa08ed76dd7b93836502e474d7093073e42ff
 
 ## 10. Python environment mismatch
 
-v1 environment 记录 `Python 3.13.13`、`torch=null`；预定手动环境为 `minionerec-dev`、Python 3.11。这里只报告环境与 provenance 不一致，不推测运行者。
+v1 environment 记录 `Python 3.13.13`、`torch=null`。WSL handoff 环境为 `minionerec-dev`；预定 AutoDL 正式环境为 `minionerec`、Python 3.11。这里只报告环境与 provenance 不一致，不推测运行者。
 
 ## 11. Evidence classification
 
@@ -145,7 +145,7 @@ PRELIMINARY_CARDINALITY_EVIDENCE
 
 ## 12. Clean cardinality v2 reproduction contract
 
-`course-valid-cardinality-v2` 必须在以下条件下由用户手动运行：课程独立 branch、课程 commit 已 checkout、tracked worktree clean、index clean、Python 3.11 预定环境、不可变输入身份检查 PASS。预期精确值为：
+`course-valid-cardinality-v2` 必须在以下条件下由用户手动运行：课程独立 branch、调用方提供的精确课程 commit 已 checkout、tracked worktree clean、index clean、课程路径内无 untracked、AutoDL `minionerec` Python 3.11 环境、不可变输入身份检查 PASS。课程范围外 untracked 数据和 Phase 4 文件只记录 provenance，不作为失败。预期精确值为：
 
 ```text
 sample_count=1360
@@ -175,10 +175,14 @@ DO_NOT_RUN_K_MATRIX
 
 ## 13. Formal K-matrix prerequisites
 
-正式配置为 `configs/course_system/valid_select_cf_sasrec_exact_kmatrix_v1.yaml`。执行入口会在创建正式输出前检查 Python、branch、tracked/index clean、课程路径由 HEAD 覆盖、固定输入 path/size/SHA-256、exact 模式、冻结 fusion/ranker、Top-20、valid-select、1360 样本和五档预算；随后在每次 K matrix 运行内重新执行当前输入的 cardinality gate。只有 clean v2 exact verification 和 checker 均 PASS 才可手动启动矩阵。
+正式执行入口会在创建输出前检查 expected commit/HEAD、Python、branch、tracked/index clean、课程路径由 HEAD 覆盖且无 untracked、固定输入 path/size/SHA-256、exact 模式、冻结 fusion/ranker、Top-20、valid-select、1360 样本和五档预算。
+
+本轮 Stage D 只允许 cardinality v2、checker、exact-value verification 和 v2 return bundle。完成后必须输出 `WAITING_FOR_USER_CARDINALITY_V2_REVIEW` 并停止。未来 K matrix 必须等待用户回传 v2、Codex 审计和用户明确确认；本轮 runbook 不提供从 Stage D 自动跳转的代码。
 
 无关 Phase 4 untracked 文件不会被删除或移动；guard 能区分它们并给出 warning。最终证据仍规定使用 AutoDL clean checkout。
 
 ## 14. Test-read statement
 
 本轮没有打开或读取任何 test split、test CSV、test prediction 或 test artifact，没有创建 test config，也没有用推荐质量调整预算。正式课程配置明确拒绝 test 输入。
+
+WSL/AutoDL 分阶段命令见 `docs/优化五/course_system_autodl_manual_runbook_v1.md`。

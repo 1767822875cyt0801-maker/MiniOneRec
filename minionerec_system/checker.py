@@ -98,6 +98,36 @@ def check_run(run_dir: str | Path) -> dict[str, Any]:
         )
         formal_guard = manifest.get("formal_execution_guard") or {}
         check(formal_guard.get("status") == "PASS", "formal execution guard PASS", formal_guard.get("status"))
+        guard_git = formal_guard.get("git") or {}
+        expected_head = formal_guard.get("expected_course_commit")
+        check(bool(expected_head), "formal guard expected commit recorded", expected_head)
+        check(
+            expected_head == guard_git.get("head") == manifest.get("head"),
+            "formal guard exact HEAD",
+            {"expected": expected_head, "guard": guard_git.get("head"), "manifest": manifest.get("head")},
+        )
+        check(
+            guard_git.get("tracked_worktree_clean") is True,
+            "formal guard tracked worktree clean",
+            guard_git.get("tracked_worktree_clean"),
+        )
+        check(guard_git.get("index_clean") is True, "formal guard index clean", guard_git.get("index_clean"))
+        check(
+            guard_git.get("course_paths_tracked_by_head") is True,
+            "formal guard course paths tracked by HEAD",
+            guard_git.get("course_paths_tracked_by_head"),
+        )
+        check(
+            int(guard_git.get("course_untracked_count", -1)) == 0,
+            "formal guard course untracked count is zero",
+            guard_git.get("course_untracked_count"),
+        )
+        unrelated = guard_git.get("unrelated_untracked_paths", [])
+        check(
+            int(guard_git.get("unrelated_untracked_count", -1)) == len(unrelated),
+            "formal guard unrelated untracked provenance count",
+            {"count": guard_git.get("unrelated_untracked_count"), "paths": unrelated},
+        )
     serialized = json.dumps({"manifest": manifest, "config": config}, ensure_ascii=False).lower()
     for term in FORBIDDEN_LATENCY_TERMS:
         check(term not in serialized, f"forbidden latency term absent: {term}", None)
